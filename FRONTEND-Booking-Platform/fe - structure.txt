@@ -1,0 +1,53 @@
+frontend/
+├── src/
+│   ├── api/
+│   │   ├── axios.js            // baseURL + credentials
+│   │   ├── auth.api.js
+│   │   ├── services.api.js
+│   │   └── bookings.api.js
+│   ├── app/
+│   │   ├── App.jsx
+│   │   └── routes.jsx          
+│   ├── auth/
+│   │   ├── AuthProvider.jsx    
+│   │   ├── RequireAuth.jsx     
+│   │   └── RequireRole.jsx     
+│   ├── layouts/
+│   │   ├── PublicLayout.jsx
+│   │   ├── CustomerLayout.jsx
+│   │   ├── ProviderLayout.jsx
+│   │   └── AdminLayout.jsx
+│   ├── pages/
+│   │   ├── public/             
+│   │   │   ├── Home.jsx
+│   │   │   ├── Services.jsx
+│   │   │   ├── ServiceDetail.jsx
+│   │   │   ├── Login.jsx
+│   │   │   └── Register.jsx
+│   │   ├── customer/
+│   │   │   ├── Dashboard.jsx
+│   │   │   ├── MyBookings.jsx
+│   │   │   └── BookingDetail.jsx
+│   │   ├── provider/
+│   │   │   ├── Dashboard.jsx
+│   │   │   ├── MyServices.jsx
+│   │   │   ├── Availability.jsx
+│   │   │   └── ProviderBookings.jsx
+│   │   ├── admin/
+│   │   │   ├── Dashboard.jsx
+│   │   │   ├── Users.jsx
+│   │   │   ├── Providers.jsx
+│   │   │   └── Bookings.jsx
+│   │   └── viewer/
+│   │       └── Favorites.jsx
+│   ├── components/
+│   │   ├── Navbar.jsx
+│   │   ├── ServiceCard.jsx
+│   │   ├── BookingForm.jsx
+│   │   └── Loading.jsx
+│   ├── hooks/
+│   │   └── useAuth.js
+│   └── main.jsx
+├── index.html
+├── vite.config.js
+└── package.json
