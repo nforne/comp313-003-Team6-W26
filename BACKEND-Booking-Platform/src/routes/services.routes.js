@@ -1,16 +1,17 @@
 // src/routes/services.routes.js
 const express = require('express');
 const router = express.Router();
-const servicesController = require('../controllers/services.controller');
-const verifyToken = require('../middleware/auth.middleware');
-const requireRole = require('../middleware/role.middleware');
+const svcCtrl = require('../controllers/service.controller');
+const { requireAuth } = require('../middleware/auth.middleware');
+const { requireRole } = require('../middleware/rbac.middleware');
 
-// Public list
-router.get('/', servicesController.list);
+// Public search and read
+router.get('/', svcCtrl.searchServices);
+router.get('/:id', svcCtrl.getService);
 
-// Provider-only create/update/delete
-router.post('/', verifyToken, requireRole('provider','admin'), servicesController.create);
-router.put('/:id', verifyToken, requireRole('provider','admin'), servicesController.update);
-router.delete('/:id', verifyToken, requireRole('provider','admin'), servicesController.remove);
+// Protected create/update/delete
+router.post('/', requireAuth, requireRole('service_provider'), svcCtrl.createService);
+router.patch('/:id', requireAuth, svcCtrl.updateService); // service ownership enforced in service layer
+router.delete('/:id', requireAuth, svcCtrl.deleteService);
 
 module.exports = router;

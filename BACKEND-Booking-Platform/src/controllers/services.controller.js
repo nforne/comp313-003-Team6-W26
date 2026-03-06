@@ -1,34 +1,59 @@
-// src/controllers/services.controller.js
-const Service = require('../models/Service.model');
+// src/controllers/service.controller.js
+const serviceService = require('../services/service.service');
+const { createServiceSchema, updateServiceSchema, searchSchema } = require('../validators/service.validator');
 
-async function list(req, res, next) {
+async function createService(req, res) {
+  const { error, value } = createServiceSchema.validate(req.body);
+  if (error) return res.status(400).json({ message: error.message });
   try {
-    const items = await Service.find().limit(50);
-    res.json({ success: true, data: items });
-  } catch (err) { next(err); }
+    // providerId must match authenticated user unless admin
+    const actor = req.user || {};
+    if (actor.role !== 'administrator' && actor.userId !== value.providerId) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    const created = await serviceService.createService(value);
+    return res.status(201).json({ service: created });
+  } catch (err) {
+    return res.status(err.status || 500).json({ message: err.message });
+  }
 }
 
-async function create(req, res, next) {
-  try {
-    const payload = req.body;
-    payload.provider = req.user.id;
-    const item = await Service.create(payload);
-    res.status(201).json({ success: true, data: item });
-  } catch (err) { next(err); }
+async function getService(req, res) {
+  const serviceId = req.params.id;
+  const svc = await serviceService.getService(serviceId);
+  if (!svc) return res.status(404).json({ message: 'Not found' });
+  return res.json({ service: svc });
 }
 
-async function update(req, res, next) {
+async function updateService(req, res) {
+  const serviceId = req.params.id;
+  const { error, value } = updateServiceSchema.validate(req.body);
+  if (error) return res.status(400).json({ message: error.message });
   try {
-    const item = await Service.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    res.json({ success: true, data: item });
-  } catch (err) { next(err); }
+    const actor = req.user || {};
+    const updated = await serviceService.updateService(serviceId, value, actor);
+    return res.json({ service: updated });
+  } catch (err) {
+    return res.status(err.status || 500).json({ message: err.message });
+  }
 }
 
-async function remove(req, res, next) {
+async function deleteService(req, res) {
+  const serviceId = req.params.id;
   try {
-    await Service.findByIdAndDelete(req.params.id);
-    res.json({ success: true });
-  } catch (err) { next(err); }
+    const actor = req.user || {};
+    await serviceService.removeService(serviceId, actor);
+    return res.status(204).send();
+  } catch (err) {
+    return res.status(err.status || 500).json({ message: err.message });
+  }
 }
 
-module.exports = { list, create, update, remove };
+async function searchServices(req, res) {
+  const { error, value } = searchSchema.validate(req.query);
+  if (error) return res.status(400).json({ message: error.message });
+  const results = await serviceService.search(value);
+  return res.json(results);
+}
+
+module.exports = { createService, getService, updateService, deleteService, searchServices };
