@@ -1,25 +1,108 @@
 // src/repositories/request.repo.js
+/**
+ * Repository for Request model
+ * - CRUD wrappers
+ * - Session-aware update helpers for transactional flows
+ * - Search helpers that respect expiresAt and status
+ * - Helpers for expiration reconciliation jobs
+ *
+ * All functions return Promises.
+ */
+
+const mongoose = require('mongoose');
 const Request = require('../models/request.model');
 
-async function createRequest(obj) {
+/**
+ * Create a request.
+ * If expiresAt is not provided, the model pre-save hook will default it to when.to.
+ * @param {Object} obj
+ * @param {ClientSession} [session] optional mongoose session
+ * @returns {Promise<Document>}
+ */
+async function createRequest(obj, session = null) {
   const r = new Request(obj);
+  if (session) return r.save({ session });
   return r.save();
 }
 
-async function findById(id) {
-  return Request.findById(id).populate('bids').exec();
+/**
+ * Find request by Mongo _id.
+ * Populates bids.
+ * @param {String} id
+ * @param {Object} [opts] { lean: boolean }
+ * @returns {Promise<Document|null>}
+ */
+async function findById(id, opts = {}) {
+  const q = Request.findById(id).populate('bids');
+  if (opts.lean) return q.lean().exec();
+  return q.exec();
 }
 
+/**
+ * Update request by _id (non-transactional).
+ * @param {String} id
+ * @param {Object} patch
+ * @returns {Promise<Document|null>}
+ */
 async function updateById(id, patch) {
+  if (!patch || Object.keys(patch).length === 0) return findById(id);
   patch.updatedAt = Date.now();
   return Request.findByIdAndUpdate(id, { $set: patch }, { new: true }).populate('bids').exec();
 }
 
-async function searchOpenRequests({ categories, location, near, radiusMeters = 50000, page = 1, pageSize = 20 }) {
+/**
+ * Update request by _id with session (transactional).
+ * Use this in booking flows where request status must be updated inside a transaction.
+ * @param {String} id
+ * @param {Object} patch
+ * @param {ClientSession} session
+ * @returns {Promise<Document|null>}
+ */
+async function updateByIdWithSession(id, patch, session) {
+  if (!patch || Object.keys(patch).length === 0) return findById(id);
+  patch.updatedAt = Date.now();
+  return Request.findByIdAndUpdate(id, { $set: patch }, { new: true, session }).populate('bids').exec();
+}
+
+/**
+ * Search open requests (status === 'active') with optional filters.
+ * Respects expiresAt implicitly by filtering status === 'active' (expired requests should be reconciled to 'expired').
+ *
+ * @param {Object} params
+ *   - categories: Array<String>
+ *   - location: String
+ *   - near: [lng, lat]
+ *   - radiusMeters: Number
+ *   - page: Number
+ *   - pageSize: Number
+ *   - includeExpiredCandidates: Boolean (if true, include requests whose expiresAt <= now)
+ * @returns {Promise<Object>} { results, total, page, pageSize }
+ */
+async function searchOpenRequests({
+  categories,
+  location,
+  near,
+  radiusMeters = 50000,
+  page = 1,
+  pageSize = 20,
+  includeExpiredCandidates = false
+} = {}) {
+  const now = Date.now();
   const filter = { status: 'active' };
+
+  if (!includeExpiredCandidates) {
+    // Exclude requests that have an expiresAt in the past (they should be reconciled by background job)
+    filter.$or = [
+      { expiresAt: { $exists: false } },
+      { expiresAt: null },
+      { expiresAt: { $gt: now } }
+    ];
+  }
+
   if (categories && categories.length) filter.categories = { $in: categories };
   if (location) filter.locations = location;
-  let query = Request.find(filter).sort({ createdAt: -1 });
+
+  let query;
   if (near && Array.isArray(near) && near.length === 2) {
     query = Request.find({
       ...filter,
@@ -30,11 +113,46 @@ async function searchOpenRequests({ categories, location, near, radiusMeters = 5
         }
       }
     });
+  } else {
+    query = Request.find(filter).sort({ createdAt: -1 });
   }
+
   const skip = (page - 1) * pageSize;
-  const results = await query.skip(skip).limit(pageSize).exec();
+  const results = await query.skip(skip).limit(pageSize).populate('bids').lean().exec();
   const total = await Request.countDocuments(filter).exec();
   return { results, total, page, pageSize };
+}
+
+/**
+ * Find requests that are candidates to be marked expired.
+ * Returns active requests whose expiresAt <= now.
+ * Use in a background reconciliation job to mark status='expired' and notify stakeholders.
+ *
+ * @param {Number} nowEpochMs
+ * @param {Number} limit
+ * @returns {Promise<Array>}
+ */
+async function findExpiredCandidates(nowEpochMs = Date.now(), limit = 100) {
+  return Request.find({
+    status: 'active',
+    expiresAt: { $lte: Number(nowEpochMs) }
+  }).limit(limit).lean().exec();
+}
+
+/**
+ * Mark a set of request ids as expired (transactional optional).
+ * Returns the update result.
+ *
+ * @param {Array<String>} ids
+ * @param {ClientSession} [session]
+ * @returns {Promise<Object>} result of updateMany
+ */
+async function markRequestsExpiredByIds(ids = [], session = null) {
+  if (!Array.isArray(ids) || ids.length === 0) return { matchedCount: 0, modifiedCount: 0 };
+  const filter = { _id: { $in: ids }, status: 'active' };
+  const update = { $set: { status: 'expired', updatedAt: Date.now() } };
+  if (session) return Request.updateMany(filter, update, { session }).exec();
+  return Request.updateMany(filter, update).exec();
 }
 
 /**
@@ -42,9 +160,7 @@ async function searchOpenRequests({ categories, location, near, radiusMeters = 5
  * - Returns the deleted document (with populated bids) if found and deleted.
  * - Returns null if no document was found for the given id.
  *
- * Note: We first fetch the document (populated) so callers can inspect related data
- * after deletion. If you need cascade deletes (e.g., remove related Bid documents),
- * implement that logic here (or use a transaction).
+ * Note: If you need cascade deletes (e.g., remove related Bid documents), implement that logic here (or use a transaction).
  */
 async function hardDeleteById(id) {
   const doc = await Request.findById(id).populate('bids').exec();
@@ -57,6 +173,9 @@ module.exports = {
   createRequest,
   findById,
   updateById,
+  updateByIdWithSession,
   searchOpenRequests,
+  findExpiredCandidates,
+  markRequestsExpiredByIds,
   hardDeleteById
 };

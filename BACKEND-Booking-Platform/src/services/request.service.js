@@ -1,13 +1,23 @@
 // src/services/request.service.js
+/**
+ * Request service (updated)
+ *
+ * - Adds in-process setTimeout-based expiration handling:
+ *   * When a request becomes `active` and has `expiresAt` set, a countdown is scheduled.
+ *   * If the request status changes away from `active` or expiresAt is cleared/changed, the timeout is cleared and rescheduled as appropriate.
+ *   * When the timeout fires, the request is marked `expired` (if still `active`) and audit/notification are emitted.
+ *
+ * Notes:
+ * - This uses in-memory timers (setTimeout). Timers do NOT survive process restarts.
+ * - For production, add a persistent scheduler (Agenda, Bull, or DB-backed reconciliation) to guarantee delivery across restarts.
+ * - The implementation keeps a Map of timers keyed by request._id.toString().
+ */
+
 const requestRepo = require('../repositories/request.repo');
 const serviceRepo = require('../repositories/service.repo'); // used to resolve serviceId -> providerId
 const { notifyProviders } = require('../utils/notification.stub');
 const auditService = require('./audit.service');
 
-/**
- * Helper: detect if a string looks like a serviceId (svc_123...) or a provider userId.
- * Adjust pattern as needed for your id formats.
- */
 function isServiceId(token) {
   return typeof token === 'string' && token.startsWith('svc_');
 }
@@ -16,12 +26,6 @@ function dedupeArray(arr = []) {
   return Array.from(new Set(arr.filter(Boolean)));
 }
 
-/**
- * Resolve provider userIds from the provided services array.
- * - service entries that are serviceIds (svc_...) are resolved to their providerId via Service repo.
- * - entries that look like userIds are treated as providerIds directly.
- * Returns { providerIds: [...], unresolvedServiceIds: [...] }
- */
 async function resolveProvidersFromServices(services = []) {
   const providerIds = [];
   const unresolvedServiceIds = [];
@@ -37,12 +41,10 @@ async function resolveProvidersFromServices(services = []) {
           unresolvedServiceIds.push(entry);
         }
       } catch (e) {
-        // log and mark unresolved
         console.warn('[request.service] error resolving serviceId', entry, e && e.message);
         unresolvedServiceIds.push(entry);
       }
     } else {
-      // treat as provider userId (no strict validation here)
       providerIds.push(entry);
     }
   }
@@ -51,16 +53,204 @@ async function resolveProvidersFromServices(services = []) {
 }
 
 /**
- * Create a request.
- * - Any authenticated user may create a request.
- * - If isPrivate === true, services[] entries are resolved to providerIds and merged with allowedProviders.
- * - Final allowedProviders contains only provider userIds (no serviceIds) and is deduplicated.
- * - If private and no providerIds resolved, throw 400.
+ * In-memory timers map for request expirations.
+ * Key: request._id.toString()
+ * Value: { timer: Timeout, runAt: epochMs }
+ */
+const expiryTimers = new Map();
+
+/**
+ * Schedule an expiration timeout for a request.
+ * - If a timer already exists for the request, it will be cleared and replaced.
+ * - If runAtEpochMs is in the past, mark expired immediately (async).
  *
- * New signature: createRequest(payload, actor, correlationId = null)
+ * @param {Object} requestDoc - mongoose document or plain object with _id, status, expiresAt
+ * @param {String|null} correlationId
+ */
+async function scheduleExpiryForRequest(requestDoc, correlationId = null) {
+  if (!requestDoc || !requestDoc._id) return;
+
+  const id = requestDoc._id.toString();
+  // Clear any existing timer first
+  clearExpiryForRequestId(id);
+
+  const expiresAt = Number(requestDoc.expiresAt || 0);
+  if (!expiresAt || isNaN(expiresAt)) return;
+
+  // Only schedule if request is active
+  if (requestDoc.status !== 'active') return;
+
+  const now = Date.now();
+  const delay = Math.max(0, expiresAt - now);
+
+  // If already past expiry, mark expired immediately (defer to next tick)
+  if (delay === 0 && expiresAt <= now) {
+    // mark expired asynchronously
+    process.nextTick(() => markRequestExpired(id, correlationId).catch(err => {
+      console.error('[request.service] immediate expire failed', id, err && err.message);
+    }));
+    return;
+  }
+
+  // Create timer
+  const timer = setTimeout(async () => {
+    try {
+      await markRequestExpired(id, correlationId);
+    } catch (e) {
+      console.error('[request.service] scheduled expire failed for', id, e && e.message);
+      await auditService.logEvent({
+        eventType: 'request.expire.failed',
+        actor: { userId: null, role: 'system' },
+        target: { type: 'Request', id },
+        outcome: 'failure',
+        severity: 'error',
+        correlationId,
+        details: { error: e && e.message }
+      });
+    } finally {
+      // cleanup timer entry
+      expiryTimers.delete(id);
+    }
+  }, delay);
+
+  expiryTimers.set(id, { timer, runAt: expiresAt });
+
+  await auditService.logEvent({
+    eventType: 'request.expire.scheduled',
+    actor: { userId: null, role: 'system' },
+    target: { type: 'Request', id },
+    outcome: 'info',
+    severity: 'info',
+    correlationId,
+    details: { scheduledFor: expiresAt, delayMs: delay }
+  });
+}
+
+/**
+ * Clear scheduled expiry for a request id (if any).
+ * @param {String} requestId
+ */
+function clearExpiryForRequestId(requestId) {
+  if (!requestId) return false;
+  const entry = expiryTimers.get(requestId.toString());
+  if (entry && entry.timer) {
+    try {
+      clearTimeout(entry.timer);
+    } catch (e) {
+      // ignore
+    }
+    expiryTimers.delete(requestId.toString());
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Mark a request as expired (idempotent).
+ * - Loads the latest request document and if status === 'active' and expiresAt <= now, sets status='expired'.
+ * - Emits audit event and notifies creator/providers as appropriate.
+ *
+ * @param {String} requestId
+ * @param {String|null} correlationId
+ */
+async function markRequestExpired(requestId, correlationId = null) {
+  if (!requestId) return null;
+  const req = await requestRepo.findById(requestId);
+  if (!req) {
+    await auditService.logEvent({
+      eventType: 'request.expire.failed.not_found',
+      actor: { userId: null, role: 'system' },
+      target: { type: 'Request', id: requestId },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: {}
+    });
+    return null;
+  }
+
+  // Only expire if still active and expiresAt <= now
+  const now = Date.now();
+  if (req.status !== 'active') {
+    await auditService.logEvent({
+      eventType: 'request.expire.skipped',
+      actor: { userId: null, role: 'system' },
+      target: { type: 'Request', id: requestId },
+      outcome: 'info',
+      severity: 'info',
+      correlationId,
+      details: { currentStatus: req.status }
+    });
+    return req;
+  }
+  if (!req.expiresAt || Number(req.expiresAt) > now) {
+    // Not yet expired
+    await auditService.logEvent({
+      eventType: 'request.expire.skipped.not_due',
+      actor: { userId: null, role: 'system' },
+      target: { type: 'Request', id: requestId },
+      outcome: 'info',
+      severity: 'info',
+      correlationId,
+      details: { expiresAt: req.expiresAt, now }
+    });
+    return req;
+  }
+
+  // Perform update
+  const updated = await requestRepo.updateById(requestId, { status: 'expired' });
+
+  await auditService.logEvent({
+    eventType: 'request.expired',
+    actor: { userId: null, role: 'system' },
+    target: { type: 'Request', id: requestId },
+    outcome: 'success',
+    severity: 'info',
+    correlationId,
+    details: { expiredAt: now }
+  });
+
+  // Notify creator and optionally providers
+  try {
+    // Notify creator (if present)
+    if (updated && updated.createdBy) {
+      // notifyProviders is a generic stub; reuse for creator notification by passing single id
+      await notifyProviders({
+        providerIds: [updated.createdBy],
+        message: `Your request "${updated.title}" has expired.`,
+        metadata: { requestId: updated._id.toString(), status: 'expired' }
+      });
+    }
+
+    // If private, notify allowedProviders that request expired
+    if (updated && updated.isPrivate && Array.isArray(updated.allowedProviders) && updated.allowedProviders.length) {
+      await notifyProviders({
+        providerIds: updated.allowedProviders,
+        message: `Private request "${updated.title}" has expired.`,
+        metadata: { requestId: updated._id.toString(), status: 'expired' }
+      });
+    }
+  } catch (e) {
+    console.error('[request.service] notify on expire failed', e && e.message);
+    await auditService.logEvent({
+      eventType: 'request.expire.notify_failed',
+      actor: { userId: null, role: 'system' },
+      target: { type: 'Request', id: requestId },
+      outcome: 'partial',
+      severity: 'warning',
+      correlationId,
+      details: { error: e && e.message }
+    });
+  }
+
+  return updated;
+}
+
+/**
+ * Create a request.
+ * - If created request is active and has expiresAt, schedule expiry countdown.
  */
 async function createRequest(payload, actor, correlationId = null) {
-  // audit context helper
   const auditCtx = { actor: actor || {}, correlationId };
 
   if (!actor || !actor.userId) {
@@ -78,15 +268,12 @@ async function createRequest(payload, actor, correlationId = null) {
     throw err;
   }
 
-  // Build base object
   const obj = Object.assign({}, payload, { createdBy: actor.userId });
 
-  // If private, resolve providerIds from services and merge with allowedProviders
   if (obj.isPrivate) {
     const servicesList = Array.isArray(obj.services) ? obj.services : [];
     const clientAllowed = Array.isArray(obj.allowedProviders) ? obj.allowedProviders : [];
 
-    // Log attempt to resolve providers
     await auditService.logEvent({
       eventType: 'request.resolve_providers.attempt',
       actor: auditCtx.actor,
@@ -99,7 +286,6 @@ async function createRequest(payload, actor, correlationId = null) {
 
     const { providerIds: resolvedFromServices, unresolvedServiceIds } = await resolveProvidersFromServices(servicesList);
 
-    // Log resolution result
     await auditService.logEvent({
       eventType: 'request.resolve_providers.result',
       actor: auditCtx.actor,
@@ -110,7 +296,6 @@ async function createRequest(payload, actor, correlationId = null) {
       details: { resolvedFromServices, unresolvedServiceIds }
     });
 
-    // Merge resolved providerIds with any client-provided allowedProviders
     const mergedProviders = dedupeArray([...(clientAllowed || []), ...resolvedFromServices]);
 
     if (mergedProviders.length === 0) {
@@ -129,13 +314,10 @@ async function createRequest(payload, actor, correlationId = null) {
     }
 
     obj.allowedProviders = mergedProviders;
-    // Note: keep services[] as originally provided for traceability.
   } else {
-    // public request: ensure allowedProviders is empty (server-side) to avoid accidental exposure
     obj.allowedProviders = [];
   }
 
-  // Persist request
   let created;
   try {
     created = await requestRepo.createRequest(obj);
@@ -152,7 +334,6 @@ async function createRequest(payload, actor, correlationId = null) {
     throw e;
   }
 
-  // Audit successful creation
   await auditService.logEvent({
     eventType: 'request.create',
     actor: auditCtx.actor,
@@ -163,7 +344,16 @@ async function createRequest(payload, actor, correlationId = null) {
     details: { isPrivate: created.isPrivate, allowedProviders: created.allowedProviders, services: created.services }
   });
 
-  // Send notifications to provider accounts (only provider userIds)
+  // Schedule expiry if applicable
+  try {
+    if (created.status === 'active' && created.expiresAt) {
+      await scheduleExpiryForRequest(created, correlationId);
+    }
+  } catch (e) {
+    console.error('[request.service] scheduleExpiryForRequest failed on create', e && e.message);
+  }
+
+  // Send notifications
   try {
     if (created.isPrivate) {
       await notifyProviders({
@@ -182,7 +372,6 @@ async function createRequest(payload, actor, correlationId = null) {
         details: { notifiedProviders: created.allowedProviders }
       });
     } else {
-      // For public requests, we currently do not target specific providers.
       await notifyProviders({
         providerIds: [],
         message: `New public request: ${created.title}`,
@@ -200,7 +389,6 @@ async function createRequest(payload, actor, correlationId = null) {
       });
     }
   } catch (e) {
-    // Do not fail creation if notification fails; log for debugging
     console.error('[request.service] notification error', e && e.message);
     await auditService.logEvent({
       eventType: 'request.notify.failed',
@@ -218,9 +406,6 @@ async function createRequest(payload, actor, correlationId = null) {
 
 /**
  * Get a request by id with visibility enforcement.
- * - Private requests: only owner, admins, or provider in allowedProviders can access.
- *
- * New signature: getRequest(id, actor, correlationId = null)
  */
 async function getRequest(id, actor, correlationId = null) {
   const auditCtx = { actor: actor || {}, correlationId };
@@ -290,10 +475,6 @@ async function getRequest(id, actor, correlationId = null) {
 
 /**
  * Search open requests.
- * - Providers see public requests + private requests where their userId is in allowedProviders.
- * - Non-authenticated users and customers see only public requests.
- *
- * New signature: searchOpenRequests(queryParams = {}, actor = null, correlationId = null)
  */
 async function searchOpenRequests(queryParams = {}, actor = null, correlationId = null) {
   const auditCtx = { actor: actor || {}, correlationId };
@@ -311,14 +492,12 @@ async function searchOpenRequests(queryParams = {}, actor = null, correlationId 
 
   const results = await requestRepo.searchOpenRequests({ categories, location, near, radiusMeters, page, pageSize });
 
-  // Filter visibility
   if (actor && actor.role === 'service_provider') {
     results.results = results.results.filter(r => {
       if (!r.isPrivate) return true;
       return Array.isArray(r.allowedProviders) && r.allowedProviders.includes(actor.userId);
     });
   } else {
-    // customers and unauthenticated users only see public requests
     results.results = results.results.filter(r => !r.isPrivate);
   }
 
@@ -340,7 +519,8 @@ async function searchOpenRequests(queryParams = {}, actor = null, correlationId 
 /**
  * Update request (owner or admin)
  *
- * New signature: updateRequest(id, patch, actor, correlationId = null)
+ * - If status transitions to 'active' and expiresAt is set, schedule expiry.
+ * - If status transitions away from 'active' or expiresAt is cleared/changed, clear existing timer.
  */
 async function updateRequest(id, patch, actor, correlationId = null) {
   const auditCtx = { actor: actor || {}, correlationId };
@@ -385,7 +565,6 @@ async function updateRequest(id, patch, actor, correlationId = null) {
     details: { patch }
   });
 
-  // If changing isPrivate or services on an existing request, re-run provider resolution logic
   if (patch.isPrivate !== undefined || (Array.isArray(patch.services) && patch.services.length > 0)) {
     const newIsPrivate = patch.isPrivate !== undefined ? patch.isPrivate : req.isPrivate;
     const servicesList = Array.isArray(patch.services) && patch.services.length ? patch.services : req.services;
@@ -410,10 +589,16 @@ async function updateRequest(id, patch, actor, correlationId = null) {
       }
       patch.allowedProviders = mergedProviders;
     } else {
-      // switching to public: clear allowedProviders
       patch.allowedProviders = [];
     }
   }
+
+  // Determine scheduling behavior before applying patch
+  const willBecomeActive = (patch.status && patch.status === 'active') || (!patch.status && req.status === 'active');
+  const willLeaveActive = (patch.status && patch.status !== 'active' && req.status === 'active');
+
+  // If expiresAt is being changed in the patch, we will reschedule accordingly after update
+  const expiresAtChanged = ('expiresAt' in patch) && (Number(patch.expiresAt || 0) !== Number(req.expiresAt || 0));
 
   let updated;
   try {
@@ -431,6 +616,36 @@ async function updateRequest(id, patch, actor, correlationId = null) {
     throw e;
   }
 
+  // Scheduling logic after update:
+  try {
+    // If request left active, clear timer
+    if (willLeaveActive) {
+      clearExpiryForRequestId(id);
+      await auditService.logEvent({
+        eventType: 'request.expire.cleared',
+        actor: auditCtx.actor,
+        target: { type: 'Request', id },
+        outcome: 'info',
+        severity: 'info',
+        correlationId,
+        details: { reason: 'status_changed' }
+      });
+    }
+
+    // If expiresAt changed while active, reschedule
+    if (expiresAtChanged && updated.status === 'active') {
+      clearExpiryForRequestId(id);
+      await scheduleExpiryForRequest(updated, correlationId);
+    }
+
+    // If status changed to active and expiresAt present, schedule
+    if (patch.status === 'active' && updated.expiresAt) {
+      await scheduleExpiryForRequest(updated, correlationId);
+    }
+  } catch (e) {
+    console.error('[request.service] scheduling post-update failed', e && e.message);
+  }
+
   await auditService.logEvent({
     eventType: 'request.update',
     actor: auditCtx.actor,
@@ -446,9 +661,7 @@ async function updateRequest(id, patch, actor, correlationId = null) {
 
 /**
  * Hard delete a request.
- * - Allowed only when request.status === 'draft'.
- * - Only the request owner or an administrator may perform the deletion.
- * - Returns the deleted document (populated) or throws an error.
+ * - Clears any scheduled expiry timer for the request.
  */
 async function hardDeleteRequest(id, actor, correlationId = null) {
   const auditCtx = { actor: actor || {}, correlationId };
@@ -469,7 +682,6 @@ async function hardDeleteRequest(id, actor, correlationId = null) {
     throw err;
   }
 
-  // Only allow hard delete in draft status
   if (req.status !== 'draft') {
     await auditService.logEvent({
       eventType: 'request.hard_delete.failed.invalid_status',
@@ -485,7 +697,6 @@ async function hardDeleteRequest(id, actor, correlationId = null) {
     throw err;
   }
 
-  // Permission check: owner or admin
   const isOwner = actor && actor.userId && actor.userId === req.createdBy;
   const isAdmin = actor && actor.role === 'administrator';
   if (!isOwner && !isAdmin) {
@@ -514,9 +725,11 @@ async function hardDeleteRequest(id, actor, correlationId = null) {
   });
 
   try {
+    // Clear any scheduled expiry
+    clearExpiryForRequestId(id);
+
     const deleted = await requestRepo.hardDeleteById(id);
     if (!deleted) {
-      // unlikely because we fetched earlier, but handle gracefully
       await auditService.logEvent({
         eventType: 'request.hard_delete.failed.not_found_after_fetch',
         actor: auditCtx.actor,
@@ -556,11 +769,20 @@ async function hardDeleteRequest(id, actor, correlationId = null) {
   }
 }
 
+/**
+ * Expose functions and timer utilities for testing and process lifecycle management.
+ */
 module.exports = {
   createRequest,
   getRequest,
   searchOpenRequests,
   updateRequest,
   resolveProvidersFromServices,
-  hardDeleteRequest
+  hardDeleteRequest,
+
+  // timer utilities (useful for tests and graceful shutdown)
+  _scheduleExpiryForRequest: scheduleExpiryForRequest,
+  _clearExpiryForRequestId: clearExpiryForRequestId,
+  _markRequestExpired: markRequestExpired,
+  _expiryTimersMap: expiryTimers
 };
