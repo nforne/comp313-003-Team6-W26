@@ -22,7 +22,7 @@ const RequestSchema = new mongoose.Schema({
   isPrivate: { type: Boolean, default: false },
   // allowedProviders MUST contain provider userIds only (no serviceIds). Service-layer will populate from services when needed.
   allowedProviders: { type: [String], default: [], index: true },
-  status: { type: String, enum: ['active','expired','booked','suspended','cancelled'], default: 'active' },
+  status: { type: String, enum: ['draft','active','expired','booked','suspended','cancelled'], default: 'active' },
   createdAt: { type: Number },
   updatedAt: { type: Number }
 }, { collection: 'requests' });

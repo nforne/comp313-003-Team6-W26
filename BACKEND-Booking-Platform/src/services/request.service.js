@@ -444,10 +444,123 @@ async function updateRequest(id, patch, actor, correlationId = null) {
   return updated;
 }
 
+/**
+ * Hard delete a request.
+ * - Allowed only when request.status === 'draft'.
+ * - Only the request owner or an administrator may perform the deletion.
+ * - Returns the deleted document (populated) or throws an error.
+ */
+async function hardDeleteRequest(id, actor, correlationId = null) {
+  const auditCtx = { actor: actor || {}, correlationId };
+
+  const req = await requestRepo.findById(id);
+  if (!req) {
+    await auditService.logEvent({
+      eventType: 'request.hard_delete.failed.not_found',
+      actor: auditCtx.actor,
+      target: { type: 'Request', id },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: {}
+    });
+    const err = new Error('Not found');
+    err.status = 404;
+    throw err;
+  }
+
+  // Only allow hard delete in draft status
+  if (req.status !== 'draft') {
+    await auditService.logEvent({
+      eventType: 'request.hard_delete.failed.invalid_status',
+      actor: auditCtx.actor,
+      target: { type: 'Request', id },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: { currentStatus: req.status }
+    });
+    const err = new Error('Request can only be hard deleted while in draft status');
+    err.status = 400;
+    throw err;
+  }
+
+  // Permission check: owner or admin
+  const isOwner = actor && actor.userId && actor.userId === req.createdBy;
+  const isAdmin = actor && actor.role === 'administrator';
+  if (!isOwner && !isAdmin) {
+    await auditService.logEvent({
+      eventType: 'request.hard_delete.forbidden',
+      actor: auditCtx.actor,
+      target: { type: 'Request', id },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: {}
+    });
+    const err = new Error('Forbidden');
+    err.status = 403;
+    throw err;
+  }
+
+  await auditService.logEvent({
+    eventType: 'request.hard_delete.attempt',
+    actor: auditCtx.actor,
+    target: { type: 'Request', id },
+    outcome: 'info',
+    severity: 'info',
+    correlationId,
+    details: {}
+  });
+
+  try {
+    const deleted = await requestRepo.hardDeleteById(id);
+    if (!deleted) {
+      // unlikely because we fetched earlier, but handle gracefully
+      await auditService.logEvent({
+        eventType: 'request.hard_delete.failed.not_found_after_fetch',
+        actor: auditCtx.actor,
+        target: { type: 'Request', id },
+        outcome: 'failure',
+        severity: 'warning',
+        correlationId,
+        details: {}
+      });
+      const err = new Error('Not found');
+      err.status = 404;
+      throw err;
+    }
+
+    await auditService.logEvent({
+      eventType: 'request.hard_delete',
+      actor: auditCtx.actor,
+      target: { type: 'Request', id },
+      outcome: 'success',
+      severity: 'info',
+      correlationId,
+      details: { deletedId: id }
+    });
+
+    return deleted;
+  } catch (e) {
+    await auditService.logEvent({
+      eventType: 'request.hard_delete.failed.db_error',
+      actor: auditCtx.actor,
+      target: { type: 'Request', id },
+      outcome: 'failure',
+      severity: 'error',
+      correlationId,
+      details: { error: e && e.message }
+    });
+    throw e;
+  }
+}
+
 module.exports = {
   createRequest,
   getRequest,
   searchOpenRequests,
   updateRequest,
-  resolveProvidersFromServices
+  resolveProvidersFromServices,
+  hardDeleteRequest
 };

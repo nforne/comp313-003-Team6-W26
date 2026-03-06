@@ -37,4 +37,26 @@ async function searchOpenRequests({ categories, location, near, radiusMeters = 5
   return { results, total, page, pageSize };
 }
 
-module.exports = { createRequest, findById, updateById, searchOpenRequests };
+/**
+ * Hard delete a request by id.
+ * - Returns the deleted document (with populated bids) if found and deleted.
+ * - Returns null if no document was found for the given id.
+ *
+ * Note: We first fetch the document (populated) so callers can inspect related data
+ * after deletion. If you need cascade deletes (e.g., remove related Bid documents),
+ * implement that logic here (or use a transaction).
+ */
+async function hardDeleteById(id) {
+  const doc = await Request.findById(id).populate('bids').exec();
+  if (!doc) return null;
+  await Request.deleteOne({ _id: id }).exec();
+  return doc;
+}
+
+module.exports = {
+  createRequest,
+  findById,
+  updateById,
+  searchOpenRequests,
+  hardDeleteById
+};

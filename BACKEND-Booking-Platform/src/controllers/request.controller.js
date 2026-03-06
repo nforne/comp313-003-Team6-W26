@@ -177,4 +177,40 @@ async function updateRequest(req, res) {
   }
 }
 
-module.exports = { createRequest, getRequest, searchRequests, updateRequest };
+/**
+ * DELETE /reqs/:id
+ * Hard delete a request. Allowed only when request.status === 'draft'.
+ * Only the request owner or an administrator may perform the deletion.
+ */
+async function deleteRequest(req, res) {
+  const correlationId = req.correlationId || null;
+  try {
+    const actor = req.user || {};
+    const deleted = await requestService.hardDeleteRequest(req.params.id, actor, correlationId);
+
+    await auditService.logEvent({
+      eventType: 'request.delete.success',
+      actor: { userId: actor && actor.userId || null, role: actor && actor.role || null },
+      target: { type: 'Request', id: req.params.id },
+      outcome: 'success',
+      severity: 'info',
+      correlationId,
+      details: { deletedId: req.params.id }
+    });
+
+    return res.json({ request: deleted });
+  } catch (err) {
+    await auditService.logEvent({
+      eventType: 'request.delete.failed',
+      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      target: { type: 'Request', id: req.params.id },
+      outcome: 'failure',
+      severity: err.status && err.status >= 500 ? 'error' : 'warning',
+      correlationId,
+      details: { message: err.message }
+    });
+    return res.status(err.status || 500).json({ message: err.message });
+  }
+}
+
+module.exports = { createRequest, getRequest, searchRequests, updateRequest, deleteRequest };

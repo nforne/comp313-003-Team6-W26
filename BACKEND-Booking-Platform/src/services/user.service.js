@@ -290,14 +290,22 @@ async function updateProfile(userId, patch, correlationId = null) {
 }
 
 /**
- * Change role (admin-only).
- * Signature: changeRole(adminUser, targetUserId, newRole, correlationId = null)
+ * Change role.
+ * Rules:
+ *  - Administrators may change any user's role to any valid role (including administrator).
+ *  - Non-administrators may change only their own role, and only between service_seeker and service_provider.
+ *  - Non-administrators may never assign the administrator role.
+ *
+ * Signature: changeRole(actorUser, targetUserId, newRole, correlationId = null)
  */
-async function changeRole(adminUser, targetUserId, newRole, correlationId = null) {
-  const actor = { userId: adminUser.userId, role: adminUser.role };
-  if (adminUser.role !== 'administrator') {
+async function changeRole(actorUser, targetUserId, newRole, correlationId = null) {
+  const actor = { userId: actorUser && actorUser.userId, role: actorUser && actorUser.role };
+  const allowedRoles = ['service_seeker', 'service_provider', 'administrator'];
+
+  // Validate requested role
+  if (!allowedRoles.includes(newRole)) {
     await auditService.logEvent({
-      eventType: 'user.changeRole.forbidden',
+      eventType: 'user.changeRole.failed.invalid_role',
       actor,
       target: { type: 'User', id: targetUserId },
       outcome: 'failure',
@@ -305,11 +313,81 @@ async function changeRole(adminUser, targetUserId, newRole, correlationId = null
       correlationId,
       details: { attemptedRole: newRole }
     });
-    const err = new Error('Forbidden');
-    err.status = 403;
+    const err = new Error('Invalid role');
+    err.status = 400;
     throw err;
   }
 
+  // Load target user
+  const target = await userRepo.findByUserId(targetUserId);
+  if (!target) {
+    await auditService.logEvent({
+      eventType: 'user.changeRole.failed.not_found',
+      actor,
+      target: { type: 'User', id: targetUserId },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: {}
+    });
+    const err = new Error('User not found');
+    err.status = 404;
+    throw err;
+  }
+
+  // Authorization rules
+  const isAdmin = actor.role === 'administrator';
+  const isSelf = actor.userId === targetUserId;
+
+  if (!isAdmin) {
+    // Non-admins cannot assign administrator role
+    if (newRole === 'administrator') {
+      await auditService.logEvent({
+        eventType: 'user.changeRole.forbidden.assign_admin',
+        actor,
+        target: { type: 'User', id: targetUserId },
+        outcome: 'failure',
+        severity: 'warning',
+        correlationId,
+        details: { attemptedRole: newRole }
+      });
+      const err = new Error('Forbidden');
+      err.status = 403;
+      throw err;
+    }
+
+    // Non-admins may only change their own role and only between service_seeker <-> service_provider
+    if (!isSelf || !['service_seeker', 'service_provider'].includes(newRole)) {
+      await auditService.logEvent({
+        eventType: 'user.changeRole.forbidden',
+        actor,
+        target: { type: 'User', id: targetUserId },
+        outcome: 'failure',
+        severity: 'warning',
+        correlationId,
+        details: { attemptedRole: newRole, isSelf, allowed: ['service_seeker','service_provider'] }
+      });
+      const err = new Error('Forbidden');
+      err.status = 403;
+      throw err;
+    }
+  }
+
+  // No-op if role is unchanged
+  if (target.role === newRole) {
+    await auditService.logEvent({
+      eventType: 'user.changeRole.noop',
+      actor,
+      target: { type: 'User', id: targetUserId },
+      outcome: 'success',
+      severity: 'info',
+      correlationId,
+      details: { currentRole: target.role }
+    });
+    return target;
+  }
+
+  // Attempt update
   try {
     const updated = await userRepo.updateByUserId(targetUserId, { role: newRole });
 
@@ -320,7 +398,7 @@ async function changeRole(adminUser, targetUserId, newRole, correlationId = null
       outcome: 'success',
       severity: 'info',
       correlationId,
-      details: { newRole }
+      details: { previousRole: target.role, newRole }
     });
 
     return updated;
@@ -332,11 +410,12 @@ async function changeRole(adminUser, targetUserId, newRole, correlationId = null
       outcome: 'failure',
       severity: 'error',
       correlationId,
-      details: { error: err.message, newRole }
+      details: { error: err.message, attemptedRole: newRole }
     });
     throw err;
   }
 }
+
 
 module.exports = {
   register,

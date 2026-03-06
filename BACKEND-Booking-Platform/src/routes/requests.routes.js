@@ -17,4 +17,7 @@ router.get('/', reqCtrl.searchRequests);
 // Update request (owner or admin)
 router.patch('/:id', requireAuth, reqCtrl.updateRequest);
 
+// Delete request (hard delete) - only allowed for draft requests; permission enforced in service
+router.delete('/:id', requireAuth, reqCtrl.deleteRequest);
+
 module.exports = router;
