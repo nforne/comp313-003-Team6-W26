@@ -1,21 +1,17 @@
 // src/middleware/auth.middleware.js
-const jwt = require('jsonwebtoken');
-const config = require('../config/env');
-const User = require('../models/User.model');
+const { verifyAccess } = require('../utils/jwt.helper');
 
-async function verifyToken(req, res, next) {
+function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-  if (!token) return res.status(401).json({ success: false, error: 'No token provided' });
-
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
   try {
-    const payload = jwt.verify(token, config.jwtSecret);
-    // attach minimal user info; avoid fetching full user for performance unless needed
-    req.user = { id: payload.id, role: payload.role };
-    next();
+    const payload = verifyAccess(token);
+    req.user = payload;
+    return next();
   } catch (err) {
-    return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+    return res.status(401).json({ message: 'Invalid token' });
   }
 }
 
-module.exports = verifyToken;
+module.exports = { requireAuth };

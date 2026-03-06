@@ -1,10 +1,11 @@
 // src/routes/auth.routes.js
 const express = require('express');
 const router = express.Router();
-const authController = require('../controllers/auth.controller');
+const authCtrl = require('../controllers/auth.controller');
+const { requireAuth } = require('../middleware/auth.middleware');
 
-// Minimal routes so app mounts without errors
-router.post('/register', authController.register);
-router.post('/login', authController.login);
+router.post('/register', authCtrl.register);
+router.post('/login', authCtrl.login);
+router.post('/logout', requireAuth, authCtrl.logout);
 
 module.exports = router;
