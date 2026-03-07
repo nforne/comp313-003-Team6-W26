@@ -13,6 +13,9 @@ const servicesRoutes = require('./routes/services.routes');
 const requestsRoutes = require('./routes/requests.routes');
 const usersRoutes = require('./routes/users.routes');
 const auditsRoutes = require('./routes/audits.routes');
+const calendarRoutes = require('./routes/calendar.routes');
+const bookingRoutes = require('./routes/booking.routes');
+const biddingRoutes = require('./routes/bid.routes');
 
 const errorMiddleware = require('./middleware/error.middleware');
 const correlationMiddleware = require('./middleware/correlation.middleware');
@@ -63,8 +66,11 @@ function createApp() {
   app.use('/api/auth', authRoutes);
   app.use('/api/svcs', servicesRoutes);
   app.use('/api/reqs', requestsRoutes);
+  app.use('/api/bids', biddingRoutes);
   app.use('/api/users', usersRoutes);
-  app.use('/api/audits', auditsRoutes);
+  app.use('/api/audts', auditsRoutes);
+  app.use('/api/clder', calendarRoutes);
+  app.use('/api/bkns', bookingRoutes);
 
   // 404 handler
   app.use((req, res, next) => {
