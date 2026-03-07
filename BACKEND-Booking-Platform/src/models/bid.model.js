@@ -15,7 +15,7 @@ const BidSchema = new mongoose.Schema({
   quote_amount: { type: Number, required: true },
   currency: { type: String, required: true, length: 3 }, // ISO 4217
   services: { type: [String], default: [] },// optional list of service ids
-  message: { type: String, default: '' },
+  message: { type: Schema.Types.ObjectId, ref: 'Message', required: false, index: true },
   status: {
     type: String,
     enum: ['draft', 'submitted', 'withdrawn', 'accepted', 'rejected', 'cancelled', 'pending_accept'],

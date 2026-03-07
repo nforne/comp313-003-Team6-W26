@@ -15,12 +15,15 @@ const usersRoutes = require('./routes/users.routes');
 const auditsRoutes = require('./routes/audits.routes');
 const calendarRoutes = require('./routes/calendar.routes');
 const bookingRoutes = require('./routes/booking.routes');
+const messageRoutes = require('./routes/message.routes');
 const biddingRoutes = require('./routes/bid.routes');
+
+const { s3Ensure } = require('./scripts/s3.ensure');
 
 const errorMiddleware = require('./middleware/error.middleware');
 const correlationMiddleware = require('./middleware/correlation.middleware');
 
-function createApp() {
+const createApp = async () => {
   const app = express();
 
   // Trust proxy when behind a load balancer (adjust if not needed)
@@ -59,6 +62,9 @@ function createApp() {
   });
   app.use(limiter);
 
+  // Ensure S3 bucket and baseline config before listening
+  await s3Ensure({ logger: app.get('logger'), bucket: 'comp313-booking-platform', enableCors: false });
+
   // Health check
   app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
@@ -70,6 +76,7 @@ function createApp() {
   app.use('/api/users', usersRoutes);
   app.use('/api/audts', auditsRoutes);
   app.use('/api/clder', calendarRoutes);
+  app.use('/api/coms', messageRoutes);
   app.use('/api/bkns', bookingRoutes);
 
   // 404 handler
