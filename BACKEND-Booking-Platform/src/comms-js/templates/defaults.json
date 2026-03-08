@@ -1,0 +1,235 @@
+{
+  "templates": [
+    {
+      "id": "auth.signin_success",
+      "version": 1,
+      "status": "active",
+      "title": "Sign-in successful",
+      "description": "Notifies user of a successful sign-in to their account.",
+      "channels": [
+        {
+          "name": "in_app",
+          "title": "Signed in from a new device",
+          "body": "Hi {{userName}}, we detected a sign-in to your account from {{device}} at {{location}} on {{time}}.",
+          "cta": { "label": "Review activity", "deepLink": "app://security/activity" }
+        },
+        {
+          "name": "email",
+          "subject": "New sign-in to your account",
+          "body": "Hi {{userName}},\n\nWe noticed a sign-in to your account from {{device}} at {{location}} on {{time}}. If this was you, no action is required. If you don't recognize this activity, please secure your account immediately.",
+          "bodyHtml": "<p>Hi {{userName}},</p><p>We noticed a sign-in to your account from <strong>{{device}}</strong> at <em>{{location}}</em> on {{time}}.</p><p>If this was you, no action is required. If you don't recognize this activity, <a href=\"{{deepLink}}\">secure your account</a> immediately.</p>",
+          "cta": { "label": "Secure account", "url": "{{deepLink}}" }
+        },
+        {
+          "name": "push",
+          "title": "New sign-in detected",
+          "body": "{{device}} · {{location}}",
+          "limits": { "titleMaxLength": 50, "bodyMaxLength": 120 }
+        },
+        {
+          "name": "websocket",
+          "title": "Signed in",
+          "body": "Sign-in from {{device}} at {{location}}",
+          "cta": { "deepLink": "app://security/activity" }
+        }
+      ],
+      "placeholders": {
+        "userName": { "type": "string", "required": true, "description": "Display name of the recipient" },
+        "device": { "type": "string", "required": true, "description": "Device or client used for sign-in" },
+        "location": { "type": "string", "required": false, "description": "Geolocation or IP-derived location" },
+        "time": { "type": "string", "required": true, "description": "Human-readable timestamp" },
+        "deepLink": { "type": "string", "required": false, "description": "Deep link to account activity" }
+      },
+      "metadata": { "priority": "high", "ttlSeconds": 86400, "tags": ["security", "auth"] },
+      "examplePayload": {
+        "userName": "Martin",
+        "device": "Chrome on macOS",
+        "location": "Brampton, ON, Canada",
+        "time": "2026-03-08 11:20 EDT",
+        "deepLink": "https://app.example.com/security/activity"
+      },
+      "createdBy": "system",
+      "createdAt": "2026-03-08T00:00:00Z",
+      "updatedBy": "system",
+      "updatedAt": "2026-03-08T00:00:00Z"
+    },
+    {
+      "id": "auth.password_reset",
+      "version": 1,
+      "status": "active",
+      "title": "Password reset request",
+      "description": "One-time password reset instructions for users who requested a reset.",
+      "channels": [
+        {
+          "name": "email",
+          "subject": "Reset your password",
+          "body": "Hi {{userName}},\n\nWe received a request to reset your password. Use the link below to set a new password. This link expires in {{expiresInMinutes}} minutes.\n\n{{resetUrl}}\n\nIf you did not request a password reset, ignore this email or contact support.",
+          "bodyHtml": "<p>Hi {{userName}},</p><p>We received a request to reset your password. Use the link below to set a new password. This link expires in <strong>{{expiresInMinutes}} minutes</strong>.</p><p><a href=\"{{resetUrl}}\">Reset your password</a></p><p>If you did not request a password reset, ignore this email or contact support.</p>",
+          "cta": { "label": "Reset password", "url": "{{resetUrl}}" }
+        },
+        {
+          "name": "in_app",
+          "title": "Password reset requested",
+          "body": "A password reset was requested for your account. Use the link sent to your email to complete the reset.",
+          "cta": { "deepLink": "app://account/security" }
+        }
+      ],
+      "placeholders": {
+        "userName": { "type": "string", "required": true },
+        "resetUrl": { "type": "url", "required": true },
+        "expiresInMinutes": { "type": "number", "required": true }
+      },
+      "metadata": { "priority": "high", "ttlSeconds": 3600, "tags": ["security", "auth"], "requiresApproval": false },
+      "examplePayload": {
+        "userName": "Martin",
+        "resetUrl": "https://app.example.com/reset?token=abc123",
+        "expiresInMinutes": 60
+      },
+      "createdBy": "system",
+      "createdAt": "2026-03-08T00:00:00Z",
+      "updatedBy": "system",
+      "updatedAt": "2026-03-08T00:00:00Z"
+    },
+    {
+      "id": "activity.mention",
+      "version": 1,
+      "status": "active",
+      "title": "User mention",
+      "description": "Notifies a user when they are mentioned in a comment or post.",
+      "channels": [
+        {
+          "name": "in_app",
+          "title": "{{actorName}} mentioned you",
+          "body": "{{actorName}} mentioned you in {{contextTitle}}: \"{{excerpt}}\"",
+          "cta": { "label": "View", "deepLink": "app://content/{{contentId}}" }
+        },
+        {
+          "name": "websocket",
+          "title": "{{actorName}} mentioned you",
+          "body": "{{excerpt}}",
+          "cta": { "deepLink": "app://content/{{contentId}}" }
+        },
+        {
+          "name": "push",
+          "title": "{{actorName}} mentioned you",
+          "body": "{{excerpt}}",
+          "limits": { "titleMaxLength": 40, "bodyMaxLength": 100 }
+        },
+        {
+          "name": "email",
+          "subject": "{{actorName}} mentioned you",
+          "body": "Hi {{userName}},\n\n{{actorName}} mentioned you in {{contextTitle}}. \"{{excerpt}}\"\n\nView the conversation: {{deepLink}}",
+          "bodyHtml": "<p>Hi {{userName}},</p><p><strong>{{actorName}}</strong> mentioned you in <em>{{contextTitle}}</em>.</p><blockquote>{{excerpt}}</blockquote><p><a href=\"{{deepLink}}\">View the conversation</a></p>"
+        }
+      ],
+      "placeholders": {
+        "userName": { "type": "string", "required": true },
+        "actorName": { "type": "string", "required": true },
+        "contextTitle": { "type": "string", "required": true },
+        "excerpt": { "type": "string", "required": true },
+        "contentId": { "type": "string", "required": true },
+        "deepLink": { "type": "string", "required": true }
+      },
+      "metadata": { "priority": "normal", "ttlSeconds": 604800, "tags": ["activity", "social"] },
+      "examplePayload": {
+        "userName": "Martin",
+        "actorName": "Aisha",
+        "contextTitle": "Project Plan",
+        "excerpt": "Looks great — @Martin can you review the timeline?",
+        "contentId": "post-123",
+        "deepLink": "https://app.example.com/content/post-123"
+      },
+      "createdBy": "product",
+      "createdAt": "2026-03-08T00:00:00Z",
+      "updatedBy": "product",
+      "updatedAt": "2026-03-08T00:00:00Z"
+    },
+    {
+      "id": "transaction.order_receipt",
+      "version": 1,
+      "status": "active",
+      "title": "Order receipt",
+      "description": "Transactional receipt sent after a successful order.",
+      "channels": [
+        {
+          "name": "email",
+          "subject": "Your receipt for order {{orderId}}",
+          "body": "Hi {{userName}},\n\nThanks for your order {{orderId}} placed on {{orderDate}}. Total: {{orderTotal}}.\n\nYou can view your receipt here: {{receiptUrl}}",
+          "bodyHtml": "<p>Hi {{userName}},</p><p>Thanks for your order <strong>{{orderId}}</strong> placed on {{orderDate}}. <strong>Total: {{orderTotal}}</strong>.</p><p><a href=\"{{receiptUrl}}\">View your receipt</a></p>",
+          "cta": { "label": "View receipt", "url": "{{receiptUrl}}" }
+        },
+        {
+          "name": "in_app",
+          "title": "Order confirmed",
+          "body": "Your order {{orderId}} was confirmed. Total: {{orderTotal}}. Tap to view details.",
+          "cta": { "deepLink": "app://orders/{{orderId}}" }
+        }
+      ],
+      "placeholders": {
+        "userName": { "type": "string", "required": true },
+        "orderId": { "type": "string", "required": true },
+        "orderDate": { "type": "string", "required": true },
+        "orderTotal": { "type": "string", "required": true },
+        "receiptUrl": { "type": "url", "required": true }
+      },
+      "metadata": { "priority": "normal", "ttlSeconds": 2592000, "tags": ["transactional", "orders"] },
+      "examplePayload": {
+        "userName": "Martin",
+        "orderId": "ORD-20260308-001",
+        "orderDate": "2026-03-08",
+        "orderTotal": "$49.99",
+        "receiptUrl": "https://app.example.com/orders/ORD-20260308-001/receipt"
+      },
+      "createdBy": "orders-service",
+      "createdAt": "2026-03-08T00:00:00Z",
+      "updatedBy": "orders-service",
+      "updatedAt": "2026-03-08T00:00:00Z"
+    },
+    {
+      "id": "broadcast.announcement",
+      "version": 1,
+      "status": "draft",
+      "title": "Product announcement",
+      "description": "Marketing/announcement template for product launches. Draft by default; requires approval before active use.",
+      "channels": [
+        {
+          "name": "email",
+          "subject": "Introducing {{featureName}}",
+          "body": "Hi {{userName}},\n\nWe're excited to announce {{featureName}}. {{shortBlurb}}\n\nLearn more: {{ctaUrl}}",
+          "bodyHtml": "<p>Hi {{userName}},</p><p>We're excited to announce <strong>{{featureName}}</strong>.</p><p>{{shortBlurb}}</p><p><a href=\"{{ctaUrl}}\">Learn more</a></p>",
+          "cta": { "label": "Learn more", "url": "{{ctaUrl}}" }
+        },
+        {
+          "name": "push",
+          "title": "{{featureName}} is live",
+          "body": "{{shortBlurb}}",
+          "limits": { "titleMaxLength": 45, "bodyMaxLength": 120 }
+        },
+        {
+          "name": "in_app",
+          "title": "{{featureName}}",
+          "body": "{{shortBlurb}}",
+          "cta": { "deepLink": "app://features/{{featureId}}" }
+        }
+      ],
+      "placeholders": {
+        "userName": { "type": "string", "required": false },
+        "featureName": { "type": "string", "required": true },
+        "shortBlurb": { "type": "string", "required": true },
+        "ctaUrl": { "type": "url", "required": true },
+        "featureId": { "type": "string", "required": false }
+      },
+      "metadata": { "priority": "low", "ttlSeconds": 604800, "tags": ["marketing", "broadcast"], "requiresApproval": true },
+      "examplePayload": {
+        "featureName": "Smart Replies",
+        "shortBlurb": "Reply faster with AI-powered suggestions right in your inbox.",
+        "ctaUrl": "https://app.example.com/features/smart-replies",
+        "featureId": "smart-replies"
+      },
+      "createdBy": "marketing",
+      "createdAt": "2026-03-08T00:00:00Z",
+      "updatedBy": "marketing",
+      "updatedAt": "2026-03-08T00:00:00Z"
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "auth.signin_success": {
+    "title": "Connexion réussie",
+    "channels": {
+      "in_app": {
+        "title": "Connexion depuis un nouvel appareil",
+        "body": "Bonjour {{userName}}, nous avons détecté une connexion à votre compte depuis {{device}} à {{location}} le {{time}}."
+      },
+      "email": {
+        "subject": "Nouvelle connexion à votre compte",
+        "body": "Bonjour {{userName}},\n\nNous avons remarqué une connexion à votre compte depuis {{device}} à {{location}} le {{time}}. Si c'était vous, aucune action n'est requise. Si vous ne reconnaissez pas cette activité, sécurisez votre compte immédiatement.",
+        "bodyHtml": "<p>Bonjour {{userName}},</p><p>Nous avons remarqué une connexion à votre compte depuis <strong>{{device}}</strong> à <em>{{location}}</em> le {{time}}.</p><p>Si c'était vous, aucune action n'est requise. Si vous ne reconnaissez pas cette activité, <a href=\"{{deepLink}}\">sécurisez votre compte</a> immédiatement.</p>"
+      },
+      "push": {
+        "title": "Nouvelle connexion détectée",
+        "body": "{{device}} · {{location}}"
+      },
+      "websocket": {
+        "title": "Connecté",
+        "body": "Connexion depuis {{device}} à {{location}}"
+      }
+    }
+  },
+
+  "auth.password_reset": {
+    "title": "Réinitialisation du mot de passe",
+    "channels": {
+      "email": {
+        "subject": "Réinitialisez votre mot de passe",
+        "body": "Bonjour {{userName}},\n\nNous avons reçu une demande de réinitialisation de votre mot de passe. Utilisez le lien ci-dessous pour définir un nouveau mot de passe. Ce lien expire dans {{expiresInMinutes}} minutes.\n\n{{resetUrl}}\n\nSi vous n'avez pas demandé de réinitialisation, ignorez ce courriel ou contactez le support.",
+        "bodyHtml": "<p>Bonjour {{userName}},</p><p>Nous avons reçu une demande de réinitialisation de votre mot de passe. Utilisez le lien ci-dessous pour définir un nouveau mot de passe. Ce lien expire dans <strong>{{expiresInMinutes}} minutes</strong>.</p><p><a href=\"{{resetUrl}}\">Réinitialiser votre mot de passe</a></p><p>Si vous n'avez pas demandé de réinitialisation, ignorez ce courriel ou contactez le support.</p>"
+      },
+      "in_app": {
+        "title": "Réinitialisation du mot de passe demandée",
+        "body": "Une demande de réinitialisation du mot de passe a été faite pour votre compte. Utilisez le lien envoyé par courriel pour terminer la réinitialisation."
+      }
+    }
+  },
+
+  "activity.mention": {
+    "title": "Vous avez été mentionné",
+    "channels": {
+      "in_app": {
+        "title": "{{actorName}} vous a mentionné",
+        "body": "{{actorName}} vous a mentionné dans {{contextTitle}} : « {{excerpt}} »"
+      },
+      "websocket": {
+        "title": "{{actorName}} vous a mentionné",
+        "body": "{{excerpt}}"
+      },
+      "push": {
+        "title": "{{actorName}} vous a mentionné",
+        "body": "{{excerpt}}"
+      },
+      "email": {
+        "subject": "{{actorName}} vous a mentionné",
+        "body": "Bonjour {{userName}},\n\n{{actorName}} vous a mentionné dans {{contextTitle}}. « {{excerpt}} »\n\nVoir la conversation : {{deepLink}}",
+        "bodyHtml": "<p>Bonjour {{userName}},</p><p><strong>{{actorName}}</strong> vous a mentionné dans <em>{{contextTitle}}</em>.</p><blockquote>{{excerpt}}</blockquote><p><a href=\"{{deepLink}}\">Voir la conversation</a></p>"
+      }
+    }
+  },
+
+  "transaction.order_receipt": {
+    "title": "Reçu de commande",
+    "channels": {
+      "email": {
+        "subject": "Votre reçu pour la commande {{orderId}}",
+        "body": "Bonjour {{userName}},\n\nMerci pour votre commande {{orderId}} passée le {{orderDate}}. Total : {{orderTotal}}.\n\nVous pouvez consulter votre reçu ici : {{receiptUrl}}",
+        "bodyHtml": "<p>Bonjour {{userName}},</p><p>Merci pour votre commande <strong>{{orderId}}</strong> passée le {{orderDate}}. <strong>Total : {{orderTotal}}</strong>.</p><p><a href=\"{{receiptUrl}}\">Consulter votre reçu</a></p>"
+      },
+      "in_app": {
+        "title": "Commande confirmée",
+        "body": "Votre commande {{orderId}} a été confirmée. Total : {{orderTotal}}. Appuyez pour voir les détails."
+      }
+    }
+  },
+
+  "broadcast.announcement": {
+    "title": "Annonce produit",
+    "channels": {
+      "email": {
+        "subject": "Présentation de {{featureName}}",
+        "body": "Bonjour {{userName}},\n\nNous sommes heureux d'annoncer {{featureName}}. {{shortBlurb}}\n\nEn savoir plus : {{ctaUrl}}",
+        "bodyHtml": "<p>Bonjour {{userName}},</p><p>Nous sommes heureux d'annoncer <strong>{{featureName}}</strong>.</p><p>{{shortBlurb}}</p><p><a href=\"{{ctaUrl}}\">En savoir plus</a></p>"
+      },
+      "push": {
+        "title": "{{featureName}} est disponible",
+        "body": "{{shortBlurb}}"
+      },
+      "in_app": {
+        "title": "{{featureName}}",
+        "body": "{{shortBlurb}}"
+      }
+    }
+  }
+}

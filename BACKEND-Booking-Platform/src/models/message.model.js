@@ -53,7 +53,7 @@ const MessageSchema = new Schema({
   // message lifecycle status
   status: {
     type: String,
-    enum: ['draft', 'submitted', 'deleted', 'read', 'unread'],
+    enum: ['draft', 'submitted', 'deleted', 'read', 'unread', 'sent'],
     default: 'draft',
     index: true
   },

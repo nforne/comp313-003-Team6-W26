@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "comms-js Template Schema",
+  "description": "Canonical schema for message/notification templates used by comms-js. Supports versioning, channels, placeholders, i18n overrides and metadata.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "status", "channels", "placeholders"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable template key (e.g. auth.signin_success)."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic version number. Increment on every change."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "active", "deprecated"],
+      "description": "Template lifecycle state. Only active templates are used for production sends."
+    },
+    "title": {
+      "type": "string",
+      "description": "Optional human-friendly title for admin UI."
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional longer description or usage notes for template owners."
+    },
+    "channels": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Channel-specific renderable content. Each entry defines how to render for a channel.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "body"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["in_app", "websocket", "email", "push", "sms"],
+            "description": "Channel identifier."
+          },
+          "subject": {
+            "type": "string",
+            "description": "Short subject line (used for email and some push providers)."
+          },
+          "title": {
+            "type": "string",
+            "description": "Short headline for in-app or push notifications."
+          },
+          "body": {
+            "type": "string",
+            "description": "Plain-text body with named placeholders (e.g. {{userName}})."
+          },
+          "bodyHtml": {
+            "type": "string",
+            "description": "Optional HTML body for email; must be sanitized before sending."
+          },
+          "cta": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "label": { "type": "string" },
+              "url": { "type": "string", "format": "uri" },
+              "deepLink": { "type": "string" }
+            },
+            "description": "Optional call-to-action for the channel."
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "titleMaxLength": { "type": "integer", "minimum": 0 },
+              "bodyMaxLength": { "type": "integer", "minimum": 0 }
+            },
+            "description": "Channel-specific length limits (e.g., push truncation)."
+          }
+        }
+      }
+    },
+    "placeholders": {
+      "type": "object",
+      "description": "Schema for named placeholders used by this template. Renderer validates presence and type.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["string", "number", "boolean", "date", "url", "object", "array"]
+          },
+          "required": { "type": "boolean", "default": true },
+          "description": { "type": "string" },
+          "example": {}
+        }
+      }
+    },
+    "locales": {
+      "type": "object",
+      "description": "Optional per-locale overrides. Keys are locale codes (e.g. en-US). Each value mirrors the top-level channels array to override channel strings.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string" },
+                "subject": { "type": "string" },
+                "title": { "type": "string" },
+                "body": { "type": "string" },
+                "bodyHtml": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "priority": { "type": "string", "enum": ["low", "normal", "high"], "default": "normal" },
+        "ttlSeconds": { "type": "integer", "minimum": 0 },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "requiresApproval": { "type": "boolean", "default": false }
+      },
+      "description": "Operational metadata for routing, governance and TTL."
+    },
+    "examplePayload": {
+      "type": "object",
+      "description": "Example variables used for preview and QA. Not used at render time unless explicitly requested."
+    },
+    "createdBy": { "type": "string" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedBy": { "type": "string" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  }
+}
