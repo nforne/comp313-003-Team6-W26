@@ -17,6 +17,7 @@ const calendarRoutes = require('./routes/calendar.routes');
 const bookingRoutes = require('./routes/booking.routes');
 const messageRoutes = require('./routes/message.routes');
 const biddingRoutes = require('./routes/bid.routes');
+const s3storeRoutes = require('./routes/s3Storage.routes');
 const reviewRoutes = require('./routes/review.routes');
 
 const { s3Ensure } = require('./scripts/s3.ensure');
@@ -79,6 +80,7 @@ const createApp = async () => {
   app.use('/api/clder', calendarRoutes);
   app.use('/api/coms', messageRoutes);
   app.use('/api/bkns', bookingRoutes);
+  app.use('/api/s3go', s3storeRoutes);
   app.use('/api/rvws', reviewRoutes);
 
   // 404 handler

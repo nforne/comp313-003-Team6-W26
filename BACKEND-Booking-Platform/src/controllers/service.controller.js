@@ -1,48 +1,75 @@
 // src/controllers/service.controller.js
+//
+// HTTP controllers for Service endpoints.
+// - Responsibilities: validate request payloads, enforce basic controller-level authorization,
+//   delegate domain logic to service layer, emit controller-level audit events, and return
+//   consistent JSON responses.
+// - Endpoints:
+//    POST   /svcs         -> createService
+//    GET    /svcs/:id     -> getService
+//    PATCH  /svcs/:id     -> updateService
+//    DELETE /svcs/:id     -> deleteService
+//    GET    /svcs         -> searchServices
+//
+// Notes:
+// - `req.user` may be undefined for unauthenticated requests; controller performs short-circuit checks
+//   (e.g., providerId must match authenticated user unless admin) but the service layer is authoritative
+//   for domain-level authorization and logging.
+// - Validators are used to validate and sanitize input; controller returns 400 on validation failures.
+
 const serviceService = require('../services/service.service');
 const auditService = require('../services/audit.service');
 const { createServiceSchema, updateServiceSchema, searchSchema } = require('../validators/service.validator');
+
+/**
+ * Helper: build actor object from req.user for audit events
+ */
+function actorFromReq(req) {
+  return { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null };
+}
 
 /**
  * POST /svcs
  */
 async function createService(req, res) {
   const correlationId = req.correlationId || null;
-  const { error, value } = createServiceSchema.validate(req.body);
+  const { error, value } = createServiceSchema.validate(req.body, { stripUnknown: true });
+
   if (error) {
     await auditService.logEvent({
       eventType: 'service.create.failed.validation',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: null },
       outcome: 'failure',
       severity: 'warning',
       correlationId,
       details: { validation: error.message }
     });
-    return res.status(400).json({ message: error.message });
+    return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error.message } });
   }
 
   try {
     const actor = req.user || {};
-    // providerId must match authenticated user unless admin
+
+    // Controller-level guard: providerId must match authenticated user unless admin
     if (actor.role !== 'administrator' && actor.userId !== value.providerId) {
       await auditService.logEvent({
         eventType: 'service.create.forbidden',
-        actor: { userId: actor.userId || null, role: actor.role || null },
+        actor: actorFromReq(req),
         target: { type: 'Service', id: null },
         outcome: 'failure',
         severity: 'warning',
         correlationId,
         details: { attemptedProviderId: value.providerId }
       });
-      return res.status(403).json({ message: 'Forbidden' });
+      return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
     }
 
     const created = await serviceService.createService(value, actor, correlationId);
 
     await auditService.logEvent({
       eventType: 'service.create.success',
-      actor: { userId: actor.userId || null, role: actor.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: created.serviceId },
       outcome: 'success',
       severity: 'info',
@@ -50,18 +77,18 @@ async function createService(req, res) {
       details: { providerId: created.providerId, name: created.name }
     });
 
-    return res.status(201).json({ service: created });
+    return res.status(201).json({ ok: true, service: created });
   } catch (err) {
     await auditService.logEvent({
       eventType: 'service.create.failed',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: null },
       outcome: 'failure',
       severity: err.status && err.status >= 500 ? 'error' : 'warning',
       correlationId,
       details: { message: err.message }
     });
-    return res.status(err.status || 500).json({ message: err.message });
+    return res.status(err.status || 500).json({ ok: false, error: { code: err.code || 'ERROR', message: err.message } });
   }
 }
 
@@ -71,30 +98,33 @@ async function createService(req, res) {
 async function getService(req, res) {
   const correlationId = req.correlationId || null;
   const serviceId = req.params.id;
+
   try {
     const actor = req.user || {};
     const svc = await serviceService.getService(serviceId, actor, correlationId);
+
     await auditService.logEvent({
       eventType: 'service.get.success',
-      actor: { userId: actor.userId || null, role: actor.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: serviceId },
       outcome: 'success',
       severity: 'info',
       correlationId,
       details: {}
     });
-    return res.json({ service: svc });
+
+    return res.json({ ok: true, service: svc });
   } catch (err) {
     await auditService.logEvent({
       eventType: 'service.get.failed',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: serviceId },
       outcome: 'failure',
       severity: err.status && err.status >= 500 ? 'error' : 'warning',
       correlationId,
       details: { message: err.message }
     });
-    return res.status(err.status || 500).json({ message: err.message });
+    return res.status(err.status || 500).json({ ok: false, error: { code: err.code || 'ERROR', message: err.message } });
   }
 }
 
@@ -104,18 +134,19 @@ async function getService(req, res) {
 async function updateService(req, res) {
   const correlationId = req.correlationId || null;
   const serviceId = req.params.id;
-  const { error, value } = updateServiceSchema.validate(req.body);
+  const { error, value } = updateServiceSchema.validate(req.body, { stripUnknown: true });
+
   if (error) {
     await auditService.logEvent({
       eventType: 'service.update.failed.validation',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: serviceId },
       outcome: 'failure',
       severity: 'warning',
       correlationId,
       details: { validation: error.message }
     });
-    return res.status(400).json({ message: error.message });
+    return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error.message } });
   }
 
   try {
@@ -124,7 +155,7 @@ async function updateService(req, res) {
 
     await auditService.logEvent({
       eventType: 'service.update.success',
-      actor: { userId: actor.userId || null, role: actor.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: serviceId },
       outcome: 'success',
       severity: 'info',
@@ -132,18 +163,18 @@ async function updateService(req, res) {
       details: { updatedFields: Object.keys(value || {}) }
     });
 
-    return res.json({ service: updated });
+    return res.json({ ok: true, service: updated });
   } catch (err) {
     await auditService.logEvent({
       eventType: 'service.update.failed',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: serviceId },
       outcome: 'failure',
       severity: err.status && err.status >= 500 ? 'error' : 'warning',
       correlationId,
       details: { message: err.message }
     });
-    return res.status(err.status || 500).json({ message: err.message });
+    return res.status(err.status || 500).json({ ok: false, error: { code: err.code || 'ERROR', message: err.message } });
   }
 }
 
@@ -153,13 +184,14 @@ async function updateService(req, res) {
 async function deleteService(req, res) {
   const correlationId = req.correlationId || null;
   const serviceId = req.params.id;
+
   try {
     const actor = req.user || {};
     await serviceService.removeService(serviceId, actor, correlationId);
 
     await auditService.logEvent({
       eventType: 'service.delete.success',
-      actor: { userId: actor.userId || null, role: actor.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: serviceId },
       outcome: 'success',
       severity: 'info',
@@ -167,18 +199,19 @@ async function deleteService(req, res) {
       details: {}
     });
 
+    // No content on successful deletion
     return res.status(204).send();
   } catch (err) {
     await auditService.logEvent({
       eventType: 'service.delete.failed',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: serviceId },
       outcome: 'failure',
       severity: err.status && err.status >= 500 ? 'error' : 'warning',
       correlationId,
       details: { message: err.message }
     });
-    return res.status(err.status || 500).json({ message: err.message });
+    return res.status(err.status || 500).json({ ok: false, error: { code: err.code || 'ERROR', message: err.message } });
   }
 }
 
@@ -187,18 +220,19 @@ async function deleteService(req, res) {
  */
 async function searchServices(req, res) {
   const correlationId = req.correlationId || null;
-  const { error, value } = searchSchema.validate(req.query);
+  const { error, value } = searchSchema.validate(req.query, { stripUnknown: true });
+
   if (error) {
     await auditService.logEvent({
       eventType: 'service.search.failed.validation',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: null },
       outcome: 'failure',
       severity: 'warning',
       correlationId,
       details: { validation: error.message }
     });
-    return res.status(400).json({ message: error.message });
+    return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error.message } });
   }
 
   try {
@@ -207,7 +241,7 @@ async function searchServices(req, res) {
 
     await auditService.logEvent({
       eventType: 'service.search.success',
-      actor: { userId: actor.userId || null, role: actor.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: null },
       outcome: 'success',
       severity: 'info',
@@ -215,19 +249,29 @@ async function searchServices(req, res) {
       details: { returned: results.results.length, total: results.total }
     });
 
-    return res.json(results);
+    return res.json({ ok: true, ...results });
   } catch (err) {
     await auditService.logEvent({
       eventType: 'service.search.failed',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: actorFromReq(req),
       target: { type: 'Service', id: null },
       outcome: 'failure',
       severity: err.status && err.status >= 500 ? 'error' : 'warning',
       correlationId,
       details: { message: err.message }
     });
-    return res.status(err.status || 500).json({ message: err.message });
+    return res.status(err.status || 500).json({ ok: false, error: { code: err.code || 'ERROR', message: err.message } });
   }
 }
 
-module.exports = { createService, getService, updateService, deleteService, searchServices };
+/* -------------------------
+ * Exports
+ * ------------------------- */
+
+module.exports = {
+  createService,
+  getService,
+  updateService,
+  deleteService,
+  searchServices
+};

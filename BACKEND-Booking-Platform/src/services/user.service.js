@@ -1,4 +1,15 @@
 // src/services/user.service.js
+//
+// User service: business logic for user lifecycle and authentication.
+// - Responsibilities: register, authenticate (login), logout, public profile retrieval,
+//   profile updates, and role changes with RBAC checks.
+// - Integrates with user repository, JWT helpers, audit service and refresh-token storage.
+// - All public functions accept an optional correlationId for tracing/audit.
+//
+// Important notes:
+// - Inputs accept plain passwords; the User model pre-save hook hashes `passwordHash`.
+// - Refresh tokens are stored server-side as SHA-256 hashes for revocation support.
+
 const crypto = require('crypto');
 const { generateNumericId } = require('../utils/id.generator');
 const userRepo = require('../repositories/user.repo');
@@ -6,26 +17,58 @@ const { signAccess, signRefresh } = require('../utils/jwt.helper');
 const bcrypt = require('bcrypt');
 const auditService = require('./audit.service');
 
+const MAX_USERID_ATTEMPTS = 5;
+
+/* -------------------------
+ * Helpers
+ * ------------------------- */
+
 /**
- * Helper: attempt to generate a unique 16-digit userId
+ * Attempt to generate a unique numeric userId.
+ * Tries up to MAX_USERID_ATTEMPTS times before throwing.
+ *
+ * @returns {Promise<string>}
  */
 async function ensureUniqueUserId() {
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < MAX_USERID_ATTEMPTS; i++) {
     const candidate = generateNumericId(16);
     const existing = await userRepo.findByUserId(candidate);
     if (!existing) return candidate;
   }
-  throw new Error('Failed to generate unique userId');
+  const err = new Error('Failed to generate unique userId');
+  err.status = 500;
+  throw err;
 }
+
+/* -------------------------
+ * Public API
+ * ------------------------- */
 
 /**
  * Register a new user.
  * Signature: register({ firstName, lastName, email, password, role }, correlationId = null)
+ *
+ * @param {Object} params
+ * @param {string} params.firstName
+ * @param {string} [params.lastName]
+ * @param {string} params.email
+ * @param {string} params.password
+ * @param {string} [params.role]
+ * @param {string|null} correlationId
+ * @returns {Promise<Document>} created user document
  */
 async function register({ firstName, lastName, email, password, role }, correlationId = null) {
   const actor = { userId: null, role: null };
+  if (!firstName || !email || !password) {
+    const err = new Error('firstName, email and password are required');
+    err.status = 400;
+    throw err;
+  }
+
+  const normalizedEmail = String(email).toLowerCase().trim();
+
   try {
-    const existing = await userRepo.findByEmail(email);
+    const existing = await userRepo.findByEmail(normalizedEmail);
     if (existing) {
       await auditService.logEvent({
         eventType: 'user.register.failed.duplicate_email',
@@ -34,7 +77,7 @@ async function register({ firstName, lastName, email, password, role }, correlat
         outcome: 'failure',
         severity: 'warning',
         correlationId,
-        details: { email }
+        details: { email: normalizedEmail }
       });
       const err = new Error('Email already in use');
       err.status = 409;
@@ -44,10 +87,10 @@ async function register({ firstName, lastName, email, password, role }, correlat
     const userId = await ensureUniqueUserId();
     const userObj = {
       userId,
-      firstName,
-      lastName,
-      emails: [{ value: email.toLowerCase(), primary: true }],
-      passwordHash: password,
+      firstName: String(firstName).trim(),
+      lastName: lastName ? String(lastName).trim() : '',
+      emails: [{ value: normalizedEmail, primary: true }],
+      passwordHash: password, // model pre-save will hash
       role
     };
 
@@ -60,12 +103,11 @@ async function register({ firstName, lastName, email, password, role }, correlat
       outcome: 'success',
       severity: 'info',
       correlationId,
-      details: { email: email.toLowerCase() }
+      details: { email: normalizedEmail }
     });
 
     return created;
   } catch (err) {
-    // If error already has status, rethrow after logging DB error if applicable
     if (!err.status) {
       await auditService.logEvent({
         eventType: 'user.register.failed.error',
@@ -85,11 +127,25 @@ async function register({ firstName, lastName, email, password, role }, correlat
  * Authenticate (login).
  * Signature: authenticate({ email, password }, correlationId = null)
  * Returns { user, accessToken, refreshToken }
+ *
+ * @param {Object} params
+ * @param {string} params.email
+ * @param {string} params.password
+ * @param {string|null} correlationId
+ * @returns {Promise<{user: Document, accessToken: string, refreshToken: string}>}
  */
 async function authenticate({ email, password }, correlationId = null) {
   const actor = { userId: null, role: null };
+  if (!email || !password) {
+    const err = new Error('email and password are required');
+    err.status = 400;
+    throw err;
+  }
+
+  const normalizedEmail = String(email).toLowerCase().trim();
+
   try {
-    const user = await userRepo.findByEmail(email);
+    const user = await userRepo.findByEmail(normalizedEmail);
     if (!user) {
       await auditService.logEvent({
         eventType: 'user.login.failed.not_found',
@@ -98,7 +154,7 @@ async function authenticate({ email, password }, correlationId = null) {
         outcome: 'failure',
         severity: 'warning',
         correlationId,
-        details: { email }
+        details: { email: normalizedEmail }
       });
       const err = new Error('Invalid credentials');
       err.status = 401;
@@ -114,7 +170,7 @@ async function authenticate({ email, password }, correlationId = null) {
         outcome: 'failure',
         severity: 'warning',
         correlationId,
-        details: { email }
+        details: { email: normalizedEmail }
       });
       const err = new Error('Invalid credentials');
       err.status = 401;
@@ -142,7 +198,6 @@ async function authenticate({ email, password }, correlationId = null) {
 
     return { user, accessToken, refreshToken };
   } catch (err) {
-    // Already logged specific failure events above; log unexpected errors
     if (!err.status) {
       await auditService.logEvent({
         eventType: 'user.login.failed.error',
@@ -161,6 +216,11 @@ async function authenticate({ email, password }, correlationId = null) {
 /**
  * Logout: remove refresh token from store.
  * Signature: logout(userId, refreshToken, correlationId = null)
+ *
+ * @param {string} userId
+ * @param {string|null} refreshToken
+ * @param {string|null} correlationId
+ * @returns {Promise<void>}
  */
 async function logout(userId, refreshToken, correlationId = null) {
   const actor = { userId, role: null };
@@ -206,6 +266,10 @@ async function logout(userId, refreshToken, correlationId = null) {
 /**
  * Get public profile (no sensitive fields).
  * Signature: getPublicProfile(userId, correlationId = null)
+ *
+ * @param {string} userId
+ * @param {string|null} correlationId
+ * @returns {Promise<Object|null>}
  */
 async function getPublicProfile(userId, correlationId = null) {
   try {
@@ -240,6 +304,11 @@ async function getPublicProfile(userId, correlationId = null) {
 /**
  * Update profile (self or admin).
  * Signature: updateProfile(userId, patch, correlationId = null)
+ *
+ * @param {string} userId
+ * @param {Object} patch
+ * @param {string|null} correlationId
+ * @returns {Promise<Document>}
  */
 async function updateProfile(userId, patch, correlationId = null) {
   const actor = { userId, role: null };
@@ -247,6 +316,7 @@ async function updateProfile(userId, patch, correlationId = null) {
     // prevent role/status changes here
     delete patch.role;
     delete patch.status;
+
     if (patch.password) {
       patch.passwordHash = patch.password;
       delete patch.password;
@@ -290,19 +360,19 @@ async function updateProfile(userId, patch, correlationId = null) {
 }
 
 /**
- * Change role.
- * Rules:
- *  - Administrators may change any user's role to any valid role (including administrator).
- *  - Non-administrators may change only their own role, and only between service_seeker and service_provider.
- *  - Non-administrators may never assign the administrator role.
- *
+ * Change role with RBAC rules.
  * Signature: changeRole(actorUser, targetUserId, newRole, correlationId = null)
+ *
+ * @param {Object} actorUser - { userId, role }
+ * @param {string} targetUserId
+ * @param {string} newRole
+ * @param {string|null} correlationId
+ * @returns {Promise<Document>}
  */
 async function changeRole(actorUser, targetUserId, newRole, correlationId = null) {
   const actor = { userId: actorUser && actorUser.userId, role: actorUser && actorUser.role };
   const allowedRoles = ['service_seeker', 'service_provider', 'administrator'];
 
-  // Validate requested role
   if (!allowedRoles.includes(newRole)) {
     await auditService.logEvent({
       eventType: 'user.changeRole.failed.invalid_role',
@@ -318,7 +388,6 @@ async function changeRole(actorUser, targetUserId, newRole, correlationId = null
     throw err;
   }
 
-  // Load target user
   const target = await userRepo.findByUserId(targetUserId);
   if (!target) {
     await auditService.logEvent({
@@ -335,12 +404,10 @@ async function changeRole(actorUser, targetUserId, newRole, correlationId = null
     throw err;
   }
 
-  // Authorization rules
   const isAdmin = actor.role === 'administrator';
   const isSelf = actor.userId === targetUserId;
 
   if (!isAdmin) {
-    // Non-admins cannot assign administrator role
     if (newRole === 'administrator') {
       await auditService.logEvent({
         eventType: 'user.changeRole.forbidden.assign_admin',
@@ -356,7 +423,6 @@ async function changeRole(actorUser, targetUserId, newRole, correlationId = null
       throw err;
     }
 
-    // Non-admins may only change their own role and only between service_seeker <-> service_provider
     if (!isSelf || !['service_seeker', 'service_provider'].includes(newRole)) {
       await auditService.logEvent({
         eventType: 'user.changeRole.forbidden',
@@ -365,7 +431,7 @@ async function changeRole(actorUser, targetUserId, newRole, correlationId = null
         outcome: 'failure',
         severity: 'warning',
         correlationId,
-        details: { attemptedRole: newRole, isSelf, allowed: ['service_seeker','service_provider'] }
+        details: { attemptedRole: newRole, isSelf, allowed: ['service_seeker', 'service_provider'] }
       });
       const err = new Error('Forbidden');
       err.status = 403;
@@ -373,7 +439,6 @@ async function changeRole(actorUser, targetUserId, newRole, correlationId = null
     }
   }
 
-  // No-op if role is unchanged
   if (target.role === newRole) {
     await auditService.logEvent({
       eventType: 'user.changeRole.noop',
@@ -387,7 +452,6 @@ async function changeRole(actorUser, targetUserId, newRole, correlationId = null
     return target;
   }
 
-  // Attempt update
   try {
     const updated = await userRepo.updateByUserId(targetUserId, { role: newRole });
 
@@ -416,6 +480,9 @@ async function changeRole(actorUser, targetUserId, newRole, correlationId = null
   }
 }
 
+/* -------------------------
+ * Exports
+ * ------------------------- */
 
 module.exports = {
   register,
