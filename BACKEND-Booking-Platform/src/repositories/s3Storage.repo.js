@@ -190,6 +190,10 @@ async function ensureBucket(bucketName = DEFAULT_BUCKET, opts = {}) {
   }
 }
 
+/* -------------------------
+ * Exports
+ * ------------------------- */
+
 module.exports = {
   generatePresignedPutUrl,
   generatePresignedGetUrl,

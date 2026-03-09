@@ -17,7 +17,7 @@
 // The service functions accept an `actor` object (may be null for system) and `correlationId` for logging/audit.
 
 const s3Repo = require('../repositories/s3Storage.repo');
-const fileRepo = require('../repos/file.repo');
+const fileRepo = require('../repositories/s3storedfiles.repo');
 const { makeObjectKey } = require('../utils/s3storage.keys');
 const auditService = require('../services/audit.service'); // optional
 const jobHandlers = require('../jobs/s3Storage.jobs'); // assumed to expose enqueue helpers or job names
@@ -375,6 +375,10 @@ async function deleteFile(actor, params = {}, opts = {}) {
 
   return { ok: true, file: updated };
 }
+
+/* -------------------------
+ * Exports
+ * ------------------------- */
 
 module.exports = {
   requestUpload,

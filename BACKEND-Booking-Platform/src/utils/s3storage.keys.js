@@ -134,6 +134,10 @@ function parseObjectKey(key) {
   return { prefix, purpose, ownerId, token, filename };
 }
 
+/* -------------------------
+ * Exports
+ * ------------------------- */
+
 module.exports = {
   makeObjectKey,
   safeFilename,
