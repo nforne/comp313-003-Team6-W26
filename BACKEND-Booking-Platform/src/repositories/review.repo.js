@@ -42,7 +42,7 @@ class ReviewRepo {
 
       // Create message
       const messagePayload = {
-        type: 'review_message',
+        type: 'review',
         subject: messageAttrs.subject || null,
         details: messageAttrs.details || reviewAttrs.messageText || '',
         attachments: messageAttrs.attachments || [],
@@ -303,7 +303,7 @@ class ReviewRepo {
 
       await Review.deleteOne({ _id: id }).session(session);
 
-      if (opts.alsoDeleteMessage && messageId) {
+      if (opts.alsoDeleteMessage && messageId) { // call message repo delete instead
         await Message.deleteOne({ _id: messageId }).session(session);
       }
 

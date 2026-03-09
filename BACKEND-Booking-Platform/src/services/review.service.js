@@ -54,7 +54,7 @@ class ReviewService {
 
     // If bookingId provided, validate booking exists and user is a participant (seeker or provider)
     if (attrs.bookingId) {
-      // bookingId is expected to be the booking.booking_id (string) per your Booking schema
+      // bookingId is expected to be the booking.booking_id (string) per the Booking schema
       const booking = await Booking.findOne({ booking_id: attrs.bookingId }).lean().exec();
       if (!booking) throw new Error('invalid_booking');
 
