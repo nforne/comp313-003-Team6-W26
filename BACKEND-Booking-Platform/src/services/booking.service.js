@@ -24,7 +24,7 @@ const bidRepo = require('../repositories/bid.repo');
 const auditService = require('./audit.service');
 
 // Scheduler utilities (Agenda wrapper). Ensure init() is called at app startup.
-const { scheduleHonorJob, cancelHonorJob } = require('../utils/bookingScheduler');
+const { scheduleHonorJob, cancelHonorJob } = require('../jobs/bookingScheduler');
 
 // TODO: Implement calendarService with session-aware methods:
 // - checkAvailability({ type, id, slots }, { session }) => { available: true/false, conflicts: [...] }
