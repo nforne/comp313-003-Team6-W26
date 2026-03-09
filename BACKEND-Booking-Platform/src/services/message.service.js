@@ -102,6 +102,8 @@ async function submitMessage(actor, messageId, { deliveryInfo = null, session = 
     // enqueue delivery for email/notification types (non-blocking)
     if (msg.type === 'email' || msg.type === 'notification') {
       try {
+        // NOTE: Covered on the controller at the moment: 
+        // --- DELIVERY: use deliver helper (server-side RBAC + comms-js) ---
         // TODO: integrate with communications engine / queue
         // e.g., communications.enqueueSend({ messageId: msg._id, type: msg.type })
         const commLog = loggerFor(actor) || console;
@@ -251,7 +253,7 @@ async function softDelete(actor, messageId, { session = null } = {}) {
 async function hardDelete(actor, messageId, { session = null } = {}) {
   const log = loggerFor(actor) || console;
   if (!(actor && actor.isAdmin)) throw Object.assign(new Error('forbidden'), { code: 'FORBIDDEN' });
-
+      // TODO call s3storage to delete attachments
   try {
     const removed = await repo.hardDeleteMessage(messageId, { session });
     await auditLog(actor, 'message.hardDelete', 'success', 'info', { messageId });
