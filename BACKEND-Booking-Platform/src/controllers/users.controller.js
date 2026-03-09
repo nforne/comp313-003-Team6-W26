@@ -1,4 +1,16 @@
 // src/controllers/users.controller.js
+//
+// HTTP controllers for user profile endpoints.
+// - getProfile: GET /users/:id
+// - updateProfile: PATCH /users/:id  (self or admin)
+// - changeRole: PATCH /users/:id/role
+//
+// Controller responsibilities:
+// - Validate request-level authorization and input shape (basic).
+// - Delegate domain logic to userService (authoritative).
+// - Emit controller-level audit events for observability and quick rejection reasons.
+// - Return consistent HTTP status codes and JSON payloads.
+
 const userService = require('../services/user.service');
 const auditService = require('../services/audit.service');
 const { profileUpdateSchema, roleChangeSchema } = require('../validators/user.validator');
@@ -9,6 +21,7 @@ const { profileUpdateSchema, roleChangeSchema } = require('../validators/user.va
 async function getProfile(req, res) {
   const correlationId = req.correlationId || null;
   const userId = req.params.id;
+
   try {
     const profile = await userService.getPublicProfile(userId, correlationId);
     if (!profile) {
@@ -21,7 +34,7 @@ async function getProfile(req, res) {
         correlationId,
         details: {}
       });
-      return res.status(404).json({ message: 'Not found' });
+      return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
     }
 
     await auditService.logEvent({
@@ -34,7 +47,7 @@ async function getProfile(req, res) {
       details: { publicView: true }
     });
 
-    return res.json({ profile });
+    return res.json({ ok: true, profile });
   } catch (err) {
     await auditService.logEvent({
       eventType: 'user.profile.get.failed',
@@ -45,7 +58,7 @@ async function getProfile(req, res) {
       correlationId,
       details: { message: err.message }
     });
-    return res.status(err.status || 500).json({ message: err.message });
+    return res.status(err.status || 500).json({ ok: false, error: { code: err.code || 'ERROR', message: err.message } });
   }
 }
 
@@ -57,7 +70,7 @@ async function updateProfile(req, res) {
   const correlationId = req.correlationId || null;
   const userId = req.params.id;
 
-  // Authorization check
+  // Authorization check: self or admin
   if (!req.user || (req.user.userId !== userId && req.user.role !== 'administrator')) {
     await auditService.logEvent({
       eventType: 'user.update.forbidden',
@@ -68,10 +81,11 @@ async function updateProfile(req, res) {
       correlationId,
       details: {}
     });
-    return res.status(403).json({ message: 'Forbidden' });
+    return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
   }
 
-  const { error, value } = profileUpdateSchema.validate(req.body);
+  // Validate input
+  const { error, value } = profileUpdateSchema.validate(req.body, { stripUnknown: true });
   if (error) {
     await auditService.logEvent({
       eventType: 'user.update.failed.validation',
@@ -82,7 +96,7 @@ async function updateProfile(req, res) {
       correlationId,
       details: { validation: error.message }
     });
-    return res.status(400).json({ message: error.message });
+    return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error.message } });
   }
 
   try {
@@ -98,7 +112,8 @@ async function updateProfile(req, res) {
       details: { updatedFields: Object.keys(value || {}) }
     });
 
-    return res.json({ user: updated.toPublicJSON() });
+    // updated may be a Mongoose document; use toPublicJSON for safe projection
+    return res.json({ ok: true, user: updated.toPublicJSON ? updated.toPublicJSON() : updated });
   } catch (err) {
     await auditService.logEvent({
       eventType: 'user.update.failed',
@@ -109,21 +124,21 @@ async function updateProfile(req, res) {
       correlationId,
       details: { message: err.message }
     });
-    return res.status(err.status || 500).json({ message: err.message });
+    return res.status(err.status || 500).json({ ok: false, error: { code: err.code || 'ERROR', message: err.message } });
   }
 }
 
 /**
  * PATCH /users/:id/role
- * Controller: validate input and enforce basic auth checks.
- * Services are authoritative for domain logging and final authorization.
+ * Controller-level validation and short-circuit authorization.
+ * Service enforces domain rules and performs authoritative logging.
  */
 async function changeRole(req, res) {
   const correlationId = req.correlationId || null;
   const targetUserId = req.params.id;
 
   // Validate payload
-  const { error, value } = roleChangeSchema.validate(req.body);
+  const { error, value } = roleChangeSchema.validate(req.body, { stripUnknown: true });
   if (error) {
     await auditService.logEvent({
       eventType: 'user.changeRole.failed.validation',
@@ -134,7 +149,7 @@ async function changeRole(req, res) {
       correlationId,
       details: { validation: error.message }
     });
-    return res.status(400).json({ message: error.message });
+    return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error.message } });
   }
 
   // Require authentication
@@ -148,12 +163,10 @@ async function changeRole(req, res) {
       correlationId,
       details: {}
     });
-    return res.status(401).json({ message: 'Authentication required' });
+    return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } });
   }
 
-  // Basic controller-level authorization short-circuits:
-  // - Non-admins may only attempt to change their own role.
-  // - Non-admins may not attempt to assign administrator role (service will also enforce).
+  // Controller-level short-circuits:
   const actor = req.user;
   const isAdmin = actor.role === 'administrator';
   const isSelf = actor.userId === targetUserId;
@@ -168,7 +181,7 @@ async function changeRole(req, res) {
       correlationId,
       details: { attemptedRole: value.role }
     });
-    return res.status(403).json({ message: 'Forbidden' });
+    return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
   }
 
   if (!isAdmin && value.role === 'administrator') {
@@ -181,18 +194,17 @@ async function changeRole(req, res) {
       correlationId,
       details: { attemptedRole: value.role }
     });
-    return res.status(403).json({ message: 'Forbidden' });
+    return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
   }
 
-  // Delegate to service (service is authoritative and will perform final checks and logging)
+  // Delegate to service (service performs final checks and logs)
   try {
     const updated = await userService.changeRole(actor, targetUserId, value.role, correlationId);
-    return res.json({ user: updated.toPublicJSON() });
+    return res.json({ ok: true, user: updated.toPublicJSON ? updated.toPublicJSON() : updated });
   } catch (err) {
-    // Do not duplicate domain-level audit logs here; service already logs.
-    return res.status(err.status || 500).json({ message: err.message });
+    // Service already logs domain-level events; surface status and message
+    return res.status(err.status || 500).json({ ok: false, error: { code: err.code || 'ERROR', message: err.message } });
   }
 }
-
 
 module.exports = { getProfile, updateProfile, changeRole };
