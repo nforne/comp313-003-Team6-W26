@@ -209,8 +209,9 @@ async function softDeleteMessage(id, { byUserId = null, session = null } = {}) {
  * - Permanently remove a message document. Intended for admin-only operations.
  * - Caller must enforce admin authorization.
  */
-async function hardDeleteMessage(id, { session = null } = {}) {
+async function hardDeleteMessage(id, { session = null } = {}) { 
   if (!mongoose.Types.ObjectId.isValid(id)) return null;
+  //TODO // call s3repo to delete attachments
   return Message.findByIdAndDelete(id, { session }).exec();
 }
 
