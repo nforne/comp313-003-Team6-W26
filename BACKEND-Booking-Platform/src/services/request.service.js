@@ -210,7 +210,7 @@ async function markRequestExpired(requestId, correlationId = null) {
     details: { expiredAt: now }
   });
 
-  // Notify creator and optionally providers
+  //TODO Notify creator and optionally providers
   try {
     // Notify creator (if present)
     if (updated && updated.createdBy) {
