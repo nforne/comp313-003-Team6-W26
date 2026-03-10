@@ -13,10 +13,15 @@
  * - The implementation keeps a Map of timers keyed by request._id.toString().
  */
 
+const mongoose = require('mongoose');
 const requestRepo = require('../repositories/request.repo');
 const serviceRepo = require('../repositories/service.repo'); // used to resolve serviceId -> providerId
-const { notifyProviders } = require('../utils/notification.stub');
+const { notifyProviders } = require('../utils/notification.stub');//dev env
 const auditService = require('./audit.service');
+
+// message persistence and delivery
+const messageRepo = require('../repositories/message.repo');
+const comms = require('../comms-js');
 
 function isServiceId(token) {
   return typeof token === 'string' && token.startsWith('svc_');
@@ -211,24 +216,96 @@ async function markRequestExpired(requestId, correlationId = null) {
   });
 
   //TODO Notify creator and optionally providers
+  // notifyProviders is a stub. 
+  // we will use comms-js index deliverMessage
+  // we will craft and submit said message here and then send the notification using comms-js index deliverMessage.
+  //---------------------------------------
   try {
-    // Notify creator (if present)
-    if (updated && updated.createdBy) {
-      // notifyProviders is a generic stub; reuse for creator notification by passing single id
-      await notifyProviders({
-        providerIds: [updated.createdBy],
-        message: `Your request "${updated.title}" has expired.`,
-        metadata: { requestId: updated._id.toString(), status: 'expired' }
-      });
+    // Build recipients list:
+    // - If private (allowedProviders present and non-empty) notify all parties involved (allowedProviders + seeker)
+    // - If public, notify only the seeker (createdBy)
+    const seekerId = updated && updated.createdBy ? String(updated.createdBy) : null;
+    const allowed = Array.isArray(updated && updated.allowedProviders) ? updated.allowedProviders.map(String) : [];
+    let recipients = [];
+
+    if (allowed && allowed.length > 0) {
+      recipients = dedupeArray([seekerId, ...allowed]);
+    } else if (seekerId) {
+      recipients = [seekerId];
     }
 
-    // If private, notify allowedProviders that request expired
-    if (updated && updated.isPrivate && Array.isArray(updated.allowedProviders) && updated.allowedProviders.length) {
-      await notifyProviders({
-        providerIds: updated.allowedProviders,
-        message: `Private request "${updated.title}" has expired.`,
+    if (recipients.length > 0) {
+      // Persist a notification message via messageRepo (handles idempotency)
+      const recipientObjectIds = recipients
+        .filter(Boolean)
+        .map(r => (mongoose.Types.ObjectId.isValid(r) ? mongoose.Types.ObjectId(r) : r));
+
+      const messageDoc = {
+        type: 'notification',
+        recipientsAll: false,
+        recipients: recipientObjectIds,
+        userId: updated.createdBy || null,
+        subject: `Request expired: ${updated.title}`,
+        details: `Request "${updated.title}" (id: ${updated._id}) has expired.`,
+        idempotencyKey: `request-expire-${updated._id.toString()}`,
+        status: 'submitted',
         metadata: { requestId: updated._id.toString(), status: 'expired' }
-      });
+      };
+
+      let persisted;
+      try {
+        persisted = await messageRepo.createMessage(messageDoc);
+      } catch (e) {
+        // log but continue to attempt delivery
+        console.error('[request.service] persist notification message failed', e && e.message);
+        await auditService.logEvent({
+          eventType: 'request.expire.notify_persist_failed',
+          actor: { userId: null, role: 'system' },
+          target: { type: 'Request', id: requestId },
+          outcome: 'partial',
+          severity: 'warning',
+          correlationId,
+          details: { error: e && e.message }
+        });
+      }
+
+      // Deliver via comms-js if persisted
+      if (persisted && persisted._id) {
+        try {
+          await comms.deliverMessage(persisted._id, { actor: { userId: null, role: 'system' }, correlationId, asyncBroadcast: true });
+        } catch (e) {
+          console.error('[request.service] comms.deliverMessage failed on expire', e && e.message);
+          await auditService.logEvent({
+            eventType: 'request.expire.notify_failed',
+            actor: { userId: null, role: 'system' },
+            target: { type: 'Request', id: requestId },
+            outcome: 'partial',
+            severity: 'warning',
+            correlationId,
+            details: { error: e && e.message }
+          });
+        }
+      } else {
+        // Fallback: attempt external notifyProviders stub (best-effort)
+        try {
+          await notifyProviders({
+            providerIds: recipients,
+            message: `Request "${updated.title}" has expired.`,
+            metadata: { requestId: updated._id.toString(), status: 'expired' }
+          });
+        } catch (e) {
+          console.error('[request.service] notifyProviders fallback failed on expire', e && e.message);
+          await auditService.logEvent({
+            eventType: 'request.expire.notify_failed',
+            actor: { userId: null, role: 'system' },
+            target: { type: 'Request', id: requestId },
+            outcome: 'partial',
+            severity: 'warning',
+            correlationId,
+            details: { error: e && e.message }
+          });
+        }
+      }
     }
   } catch (e) {
     console.error('[request.service] notify on expire failed', e && e.message);
@@ -242,6 +319,7 @@ async function markRequestExpired(requestId, correlationId = null) {
       details: { error: e && e.message }
     });
   }
+ //---------------------------------------
 
   return updated;
 }
@@ -249,6 +327,11 @@ async function markRequestExpired(requestId, correlationId = null) {
 /**
  * Create a request.
  * - If created request is active and has expiresAt, schedule expiry countdown.
+ *
+ * Validation added:
+ * - when.from and when.to must not be in the past (when.to must be > now; when.from must be >= now).
+ * - when.to must be >= when.from.
+ * - If expiresAt is provided, it must not be after when.to.
  */
 async function createRequest(payload, actor, correlationId = null) {
   const auditCtx = { actor: actor || {}, correlationId };
@@ -269,6 +352,125 @@ async function createRequest(payload, actor, correlationId = null) {
   }
 
   const obj = Object.assign({}, payload, { createdBy: actor.userId });
+
+  // --- Validation: when.from / when.to and expiresAt ---
+  const now = Date.now();
+
+  if (!obj.when || typeof obj.when !== 'object') {
+    const err = new Error('Invalid or missing "when" window');
+    err.status = 400;
+    await auditService.logEvent({
+      eventType: 'request.create.failed.invalid_when',
+      actor: auditCtx.actor,
+      target: { type: 'Request', id: null },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: { when: obj.when }
+    });
+    throw err;
+  }
+
+  const from = Number(obj.when.from || 0);
+  const to = Number(obj.when.to || 0);
+
+  if (!from || !to || isNaN(from) || isNaN(to)) {
+    const err = new Error('"when.from" and "when.to" must be valid epoch millisecond numbers');
+    err.status = 400;
+    await auditService.logEvent({
+      eventType: 'request.create.failed.invalid_when_values',
+      actor: auditCtx.actor,
+      target: { type: 'Request', id: null },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: { when: obj.when }
+    });
+    throw err;
+  }
+
+  // Ensure to is in the future
+  if (to <= now) {
+    const err = new Error('"when.to" must be in the future');
+    err.status = 400;
+    await auditService.logEvent({
+      eventType: 'request.create.failed.when_to_in_past',
+      actor: auditCtx.actor,
+      target: { type: 'Request', id: null },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: { when: obj.when, now }
+    });
+    throw err;
+  }
+
+  // Ensure from is not in the past (must be >= now)
+  if (from < now) {
+    const err = new Error('"when.from" must be now or in the future');
+    err.status = 400;
+    await auditService.logEvent({
+      eventType: 'request.create.failed.when_from_in_past',
+      actor: auditCtx.actor,
+      target: { type: 'Request', id: null },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: { when: obj.when, now }
+    });
+    throw err;
+  }
+
+  // Ensure to >= from
+  if (to < from) {
+    const err = new Error('"when.to" must be greater than or equal to "when.from"');
+    err.status = 400;
+    await auditService.logEvent({
+      eventType: 'request.create.failed.when_to_before_from',
+      actor: auditCtx.actor,
+      target: { type: 'Request', id: null },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: { when: obj.when }
+    });
+    throw err;
+  }
+
+  // If expiresAt provided, ensure it is not after when.to
+  if (obj.expiresAt !== undefined && obj.expiresAt !== null) {
+    const expiresAtNum = Number(obj.expiresAt);
+    if (isNaN(expiresAtNum)) {
+      const err = new Error('"expiresAt" must be a valid epoch millisecond number');
+      err.status = 400;
+      await auditService.logEvent({
+        eventType: 'request.create.failed.invalid_expiresAt',
+        actor: auditCtx.actor,
+        target: { type: 'Request', id: null },
+        outcome: 'failure',
+        severity: 'warning',
+        correlationId,
+        details: { expiresAt: obj.expiresAt }
+      });
+      throw err;
+    }
+    if (expiresAtNum > to) {
+      const err = new Error('"expiresAt" must not be after the request "when.to"');
+      err.status = 400;
+      await auditService.logEvent({
+        eventType: 'request.create.failed.expiresAt_after_to',
+        actor: auditCtx.actor,
+        target: { type: 'Request', id: null },
+        outcome: 'failure',
+        severity: 'warning',
+        correlationId,
+        details: { expiresAt: expiresAtNum, whenTo: to }
+      });
+      throw err;
+    }
+  }
+
+  // --- End validation ---
 
   if (obj.isPrivate) {
     const servicesList = Array.isArray(obj.services) ? obj.services : [];
@@ -353,40 +555,97 @@ async function createRequest(payload, actor, correlationId = null) {
     console.error('[request.service] scheduleExpiryForRequest failed on create', e && e.message);
   }
 
-  // Send notifications
+  //TODO Notify creator and optionally providers
+  // notifyProviders is a stub. 
+  // we will use comms-js index deliverMessage
+  // we will craft and submit said message here and then send the notification using comms-js index deliverMessage.
+  //---------------------------------------
   try {
-    if (created.isPrivate) {
-      await notifyProviders({
-        providerIds: created.allowedProviders,
-        message: `New private request: ${created.title}`,
-        metadata: { requestId: created._id, createdBy: created.createdBy }
-      });
+    // Build recipients list:
+    // - If private (allowedProviders present and non-empty) notify all parties involved (allowedProviders + seeker)
+    // - If public, notify only the seeker (createdBy)
+    const seekerId = created && created.createdBy ? String(created.createdBy) : null;
+    const allowed = Array.isArray(created && created.allowedProviders) ? created.allowedProviders.map(String) : [];
+    let recipients = [];
 
-      await auditService.logEvent({
-        eventType: 'request.notify.providers',
-        actor: auditCtx.actor,
-        target: { type: 'Request', id: created._id.toString() },
-        outcome: 'success',
-        severity: 'info',
-        correlationId,
-        details: { notifiedProviders: created.allowedProviders }
-      });
-    } else {
-      await notifyProviders({
-        providerIds: [],
-        message: `New public request: ${created.title}`,
-        metadata: { requestId: created._id, createdBy: created.createdBy }
-      });
+    if (allowed && allowed.length > 0) {
+      recipients = dedupeArray([seekerId, ...allowed]);
+    } else if (seekerId) {
+      recipients = [seekerId];
+    }
 
-      await auditService.logEvent({
-        eventType: 'request.notify.providers.public',
-        actor: auditCtx.actor,
-        target: { type: 'Request', id: created._id.toString() },
-        outcome: 'info',
-        severity: 'info',
-        correlationId,
-        details: {}
-      });
+    if (recipients.length > 0) {
+      // Persist a notification message via messageRepo (handles idempotency)
+      const recipientObjectIds = recipients
+        .filter(Boolean)
+        .map(r => (mongoose.Types.ObjectId.isValid(r) ? mongoose.Types.ObjectId(r) : r));
+
+      const messageDoc = {
+        type: 'notification',
+        recipientsAll: false,
+        recipients: recipientObjectIds,
+        userId: created.createdBy || null,
+        subject: created.isPrivate ? `New private request: ${created.title}` : `New request created: ${created.title}`,
+        details: created.isPrivate
+          ? `A private request "${created.title}" has been created and targets specific providers.`
+          : `A new request "${created.title}" has been created.`,
+        idempotencyKey: `request-create-${created._id.toString()}`,
+        status: 'submitted',
+        metadata: { requestId: created._id.toString(), createdBy: created.createdBy }
+      };
+
+      let persisted;
+      try {
+        persisted = await messageRepo.createMessage(messageDoc);
+      } catch (e) {
+        console.error('[request.service] persist notification message failed', e && e.message);
+        await auditService.logEvent({
+          eventType: 'request.notify.persist_failed',
+          actor: auditCtx.actor,
+          target: { type: 'Request', id: created._id.toString() },
+          outcome: 'partial',
+          severity: 'warning',
+          correlationId,
+          details: { error: e && e.message }
+        });
+      }
+
+      if (persisted && persisted._id) {
+        try {
+          await comms.deliverMessage(persisted._id, { actor: auditCtx.actor, correlationId, asyncBroadcast: true });
+        } catch (e) {
+          console.error('[request.service] comms.deliverMessage failed on create', e && e.message);
+          await auditService.logEvent({
+            eventType: 'request.notify.failed',
+            actor: auditCtx.actor,
+            target: { type: 'Request', id: created._id.toString() },
+            outcome: 'partial',
+            severity: 'warning',
+            correlationId,
+            details: { error: e && e.message }
+          });
+        }
+      } else {
+        // Fallback: attempt external notifyProviders stub (best-effort)
+        try {
+          await notifyProviders({
+            providerIds: recipients,
+            message: created.isPrivate ? `New private request: ${created.title}` : `New request: ${created.title}`,
+            metadata: { requestId: created._id.toString(), createdBy: created.createdBy }
+          });
+        } catch (e) {
+          console.error('[request.service] notifyProviders fallback failed on create', e && e.message);
+          await auditService.logEvent({
+            eventType: 'request.notify.failed',
+            actor: auditCtx.actor,
+            target: { type: 'Request', id: created._id.toString() },
+            outcome: 'partial',
+            severity: 'warning',
+            correlationId,
+            details: { error: e && e.message }
+          });
+        }
+      }
     }
   } catch (e) {
     console.error('[request.service] notification error', e && e.message);
@@ -400,6 +659,7 @@ async function createRequest(payload, actor, correlationId = null) {
       details: { error: e && e.message }
     });
   }
+  //---------------------------------------
 
   return created;
 }
