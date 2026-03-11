@@ -99,7 +99,7 @@ const CalendarSchema = new Schema(
     // optimistic lock for owner/admin updates (epoch ms when lock acquired)
     updateLockEpoch: { type: Number, default: null },
 
-    meta: { type: Schema.Types.Mixed, default: {} },
+    metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
 
     createdAtEpoch: { type: Number, default: () => Date.now() },
     updatedAtEpoch: { type: Number, default: () => Date.now() }

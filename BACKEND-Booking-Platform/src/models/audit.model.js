@@ -15,7 +15,9 @@ const AuditSchema = new mongoose.Schema({
   severity: { type: String, enum: ['info','warning','error','critical'], default: 'info' },
   correlationId: { type: String, index: true }, // request-level id for tracing
   details: { type: Object, default: {} }, // arbitrary JSON with context
+  metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
   createdAt: { type: Number, required: true } // epoch ms
+
 }, { collection: 'audits' });
 
 AuditSchema.pre('save', function(next) {

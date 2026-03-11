@@ -36,6 +36,8 @@ const RequestSchema = new mongoose.Schema({
   expiresAtDate: { type: Date, default: null },
 
   status: { type: String, enum: ['draft','active','expired','booked','suspended','cancelled'], default: 'draft' },
+  
+  metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
 
   createdAt: { type: Number },
   updatedAt: { type: Number }

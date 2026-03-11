@@ -87,6 +87,8 @@ const UserSchema = new Schema({
   reviews: [{ type: Schema.Types.ObjectId, ref: 'Review' }],
   refreshTokens: [{ tokenHash: String, createdAt: Number }],
 
+  metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+
   // Auditing timestamps (epoch ms)
   createdAt: { type: Number, default: () => Date.now() },
   updatedAt: { type: Number, default: () => Date.now() }

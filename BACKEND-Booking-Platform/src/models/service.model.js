@@ -94,6 +94,8 @@ const ServiceSchema = new Schema({
     index: true
   },
 
+  metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+
   // Auditing timestamps (epoch ms)
   createdAt: { type: Number, default: () => Date.now() },
   updatedAt: { type: Number, default: () => Date.now() }
