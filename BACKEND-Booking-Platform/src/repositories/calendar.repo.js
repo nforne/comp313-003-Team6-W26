@@ -478,6 +478,96 @@ repo.releaseTentativeSlot = async function (ownerId, bookingId) {
   return { ok: true, result: res };
 };
 
+/**
+ * confirmBookingSlots
+ * - Atomically mark bookingsSlots entries with bookingId as 'confirmed' for the given owner/service week(s).
+ * - ownerId: optional (null to match service calendars)
+ * - serviceId: optional (null to match owner calendars)
+ * - Returns { ok:true, result } where result is the update result.
+ */
+repo.confirmBookingSlots = async function (ownerId = null, serviceId = null, bookingId) {
+  if (!bookingId) throw new Error('bookingId required');
+
+  const query = {};
+  if (ownerId) query.ownerId = ownerId;
+  if (serviceId) query.serviceId = serviceId;
+  // match any calendar that contains the bookingId
+  query['bookingsSlots.bookingId'] = bookingId;
+
+  const now = Date.now();
+  const res = await Calendar.updateMany(
+    query,
+    {
+      $set: { 'bookingsSlots.$[s].status': 'confirmed', updatedAtEpoch: now },
+      $pull: { 'metadata.lockedSlots': bookingId }
+    },
+    { arrayFilters: [{ 's.bookingId': bookingId, 's.status': { $ne: 'confirmed' } }], multi: true }
+  ).exec();
+
+  return { ok: true, result: res };
+};
+
+/**
+ * removeBookingEntries
+ * - Atomically mark bookingsSlots entries with bookingId as 'cancelled' for the given owner/service week(s).
+ * - Also removes any slot locks for that booking.
+ * - Returns { ok: true, result }.
+ */
+repo.removeBookingEntries = async function (ownerId = null, serviceId = null, bookingId) {
+  if (!bookingId) throw new Error('bookingId required');
+
+  const query = {};
+  if (ownerId) query.ownerId = ownerId;
+  if (serviceId) query.serviceId = serviceId;
+  query['bookingsSlots.bookingId'] = bookingId;
+
+  const now = Date.now();
+  const res = await Calendar.updateMany(
+    query,
+    {
+      $set: { 'bookingsSlots.$[s].status': 'cancelled', updatedAtEpoch: now },
+      $pull: { 'metadata.lockedSlots': bookingId }
+    },
+    { arrayFilters: [{ 's.bookingId': bookingId, 's.status': { $ne: 'cancelled' } }], multi: true }
+  ).exec();
+
+  return { ok: true, result: res };
+};
+
+/**
+ * findCalendarsWithBooking
+ * - Returns an array of lean calendar docs (minimal fields) that contain the bookingId.
+ * - Useful to locate which calendar heads/overflow docs reference a booking.
+ */
+repo.findCalendarsWithBooking = async function (bookingId) {
+  if (!bookingId) return [];
+  const q = { 'bookingsSlots.bookingId': bookingId };
+  // return minimal fields to keep payload small
+  const fields = { ownerId: 1, serviceId: 1, 'datesBracket.startEpoch': 1, 'datesBracket.endEpoch': 1, bookingsSlots: 1, isOverflow: 1 };
+  const docs = await Calendar.find(q).select(fields).lean().exec();
+  return docs || [];
+};
+
+/**
+ * releaseTentativeSlotAcrossOwners
+ * - Convenience: mark any calendar slot with bookingId as cancelled across all owners/services.
+ * - Returns { ok:true, result }.
+ */
+repo.releaseTentativeSlotAcrossOwners = async function (bookingId) {
+  if (!bookingId) throw new Error('bookingId required');
+  const now = Date.now();
+  const res = await Calendar.updateMany(
+    { 'bookingsSlots.bookingId': bookingId },
+    {
+      $set: { 'bookingsSlots.$[s].status': 'cancelled', updatedAtEpoch: now },
+      $pull: { 'metadata.lockedSlots': bookingId }
+    },
+    { arrayFilters: [{ 's.bookingId': bookingId, 's.status': { $ne: 'cancelled' } }], multi: true }
+  ).exec();
+
+  return { ok: true, result: res };
+};
+
 repo.acquireCalendarLock = async function (ownerId, weekStartEpoch, lockTimeoutMs = 30 * 1000) {
   return Calendar.acquireCalendarLock(ownerId, weekStartEpoch, Date.now(), lockTimeoutMs);
 };

@@ -25,7 +25,7 @@
 
 const express = require('express');
 const calendarController = require('../controllers/calendar.controller');
-const { requireAuth } = require('../middleware/auth.middleware');
+const { requireAuth, optionalAuth } = require('../middleware/auth.middleware');
 const { requireRole } = require('../middleware/rbac.middleware');
 const {
   validate,
@@ -110,7 +110,7 @@ router.post(
  */
 router.get(
   '/weekscalendar',
-  requireAuth,
+  optionalAuth,
   validate(weekscalendarSchema, 'query'),
   (req, res, next) => {
     if (req.validated && req.validated.query) req.query = Object.assign({}, req.query, req.validated.query);

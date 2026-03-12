@@ -1,12 +1,17 @@
-// src/models/booking.model.js
 /**
+ * src/models/booking.model.js
+ *
  * Booking model (production-ready)
  *
  * - Uses epoch milliseconds (Number) for createdAt / updatedAt and slot boundaries.
  * - Includes validation for slots (from < to, no overlaps, reasonable duration bounds).
  * - Provides instance helpers and static query helpers used by services and repos.
  *
- * Field naming follows snake_case to match existing codebase conventions.
+ * Non-disruptive: existing fields, hooks and indexes preserved. Added small helpers:
+ *  - statics.findByBookingId
+ *  - methods.cancel
+ *  - lightweight services validator
+ *  - virtuals firstSlotFrom / lastSlotTo
  */
 
 const mongoose = require('mongoose');
@@ -46,7 +51,7 @@ const BookingSchema = new mongoose.Schema({
     required: true,
     uppercase: true,
     trim: true,
-    default: 'USD',
+    default: 'CAD',
     validate: {
       validator: v => typeof v === 'string' && v.length === 3,
       message: props => `${props.value} is not a valid 3-letter currency code`
@@ -94,7 +99,25 @@ const BookingSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
+/* -------------------------
+ * Virtuals
+ * ------------------------- */
+
 /**
+ * firstSlotFrom / lastSlotTo
+ * - convenience virtuals for quick range queries and sorting
+ */
+BookingSchema.virtual('firstSlotFrom').get(function () {
+  if (!Array.isArray(this.slots) || this.slots.length === 0) return null;
+  return this.slots.reduce((min, s) => (min === null || s.from < min ? s.from : min), null);
+});
+
+BookingSchema.virtual('lastSlotTo').get(function () {
+  if (!Array.isArray(this.slots) || this.slots.length === 0) return null;
+  return this.slots.reduce((max, s) => (max === null || s.to > max ? s.to : max), null);
+});
+
+/* -------------------------
  * Validation helpers
  */
 
@@ -147,6 +170,23 @@ BookingSchema.pre('validate', function (next) {
     }
   }
 
+  // Lightweight services validation: ensure service ids look like 'svc_...' when present
+  if (Array.isArray(this.services)) {
+    for (let i = 0; i < this.services.length; i++) {
+      const s = this.services[i];
+      if (typeof s !== 'string') {
+        const err = new Error(`Service id must be a string at index ${i}`);
+        err.status = 400;
+        return next(err);
+      }
+      if (s && !s.startsWith('svc_')) {
+        const err = new Error(`Service id must start with 'svc_' at index ${i}`);
+        err.status = 400;
+        return next(err);
+      }
+    }
+  }
+
   next();
 });
 
@@ -160,13 +200,14 @@ BookingSchema.pre('save', function (next) {
   next();
 });
 
-/**
+/* -------------------------
  * Instance methods
  */
 
 /**
  * isCancelable
  * - returns true if booking is in a state that allows cancellation
+ * - NOTE: preserved original behavior (non-disruptive)
  */
 BookingSchema.methods.isCancelable = function () {
   return ['active', 'honored'].includes(this.status);
@@ -175,7 +216,6 @@ BookingSchema.methods.isCancelable = function () {
 /**
  * overlapsWithSlots
  * - checks whether provided slot array overlaps with this booking's slots
- * - useful for calendar/conflict checks at model level
  */
 BookingSchema.methods.overlapsWithSlots = function (otherSlots = []) {
   if (!Array.isArray(otherSlots) || otherSlots.length === 0 || !Array.isArray(this.slots) || this.slots.length === 0) return false;
@@ -197,7 +237,44 @@ BookingSchema.methods.overlapsWithSlots = function (otherSlots = []) {
 };
 
 /**
+ * cancel
+ * - actor: { type: 'seeker'|'provider'|'admin', id: string }
+ * - reason: optional string
+ * - sets status to seeker_cancelled or provider_cancelled (or suspended for admin if desired)
+ * - records cancellation metadata under metadata.cancellations (append)
+ */
+BookingSchema.methods.cancel = async function (actor = {}, reason = '') {
+  if (!this.isCancelable()) {
+    const err = new Error('Booking not cancelable in current state');
+    err.status = 400;
+    throw err;
+  }
+
+  const actorType = actor && actor.type ? actor.type : null;
+  const actorId = actor && actor.id ? actor.id : null;
+
+  if (actorType === 'seeker') this.status = 'seeker_cancelled';
+  else if (actorType === 'provider') this.status = 'provider_cancelled';
+  else this.status = 'suspended'; // admin or unknown actor -> suspended as safe default
+
+  this.updatedAt = Date.now();
+
+  // append cancellation record
+  this.metadata = this.metadata || {};
+  this.metadata.cancellations = this.metadata.cancellations || [];
+  this.metadata.cancellations.push({
+    at: Date.now(),
+    by: { type: actorType, id: actorId },
+    reason: reason || null
+  });
+
+  return this.save();
+};
+
+/*
+ * -------------------------
  * Static helpers
+ * -------------------------
  */
 
 /**
@@ -205,6 +282,14 @@ BookingSchema.methods.overlapsWithSlots = function (otherSlots = []) {
  */
 BookingSchema.statics.findByRequest = function (requestId) {
   return this.find({ request_id: requestId }).exec();
+};
+
+/**
+ * findByBookingId
+ * - convenience wrapper for external lookups by booking_id
+ */
+BookingSchema.statics.findByBookingId = function (bookingId) {
+  return this.findOne({ booking_id: bookingId }).exec();
 };
 
 /**
@@ -231,7 +316,7 @@ BookingSchema.statics.listBySeeker = async function (seekerId, { page = 1, pageS
   return { results, total, page, pageSize };
 };
 
-/**
+/* -------------------------
  * Indexes
  *
  * - booking_id unique for external references

@@ -299,11 +299,51 @@ async function listBookingsForSeeker(req, res) {
   }
 }
 
+/* GET /bkns/service/:serviceId */
+async function listBookingsForService(req, res) {
+  const correlationId = getCorrelationId(req);
+  try {
+    const serviceId = req.params.serviceId;
+    const { page = 1, pageSize = 20, status } = req.query;
+
+    const results = await bookingRepo.listByService(serviceId, {
+      page: Number(page),
+      pageSize: Number(pageSize),
+      status
+    });
+
+    await auditService.logEvent({
+      eventType: 'booking.list.service',
+      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      target: { type: 'Service', id: serviceId },
+      outcome: 'success',
+      severity: 'info',
+      correlationId,
+      details: { returned: results.results.length, page: results.page, pageSize: results.pageSize }
+    });
+
+    return res.json(results);
+  } catch (err) {
+    const status = err.status || 500;
+    await auditService.logEvent({
+      eventType: 'booking.list.service.failed',
+      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      target: { type: 'Service', id: req.params.serviceId || null },
+      outcome: 'failure',
+      severity: status >= 500 ? 'error' : 'warning',
+      correlationId,
+      details: { message: err.message }
+    });
+    return res.status(status).json({ message: err.message });
+  }
+}
+
 module.exports = {
   confirmBooking,
   cancelBooking,
   updateBooking,
   getBooking,
   listBookingsForProvider,
-  listBookingsForSeeker
+  listBookingsForSeeker,
+  listBookingsForService
 };

@@ -1,20 +1,16 @@
 /**
  * src/services/booking.service.js
  *
- * Booking service - production-ready implementation
+ * Booking service - production-ready (polished, non-disruptive)
  *
- * Responsibilities:
  * - createBookingTransactional: atomic booking creation using MongoDB session
- *   (booking record, request status update, bid transitions, calendar confirmation).
- * - updateBooking: controlled updates with RBAC for status transitions and slot changes.
- * - cancelBooking: cancel booking with proper status and calendar release.
- * - Integrates with a persistent scheduler to mark bookings honored after the booking window.
+ * - updateBooking: controlled updates with RBAC for status transitions and slot changes
+ * - cancelBooking: cancel booking, remove future calendar entries, notify parties
  *
- * Notes / TODOs:
- * - calendarService is referenced but not implemented here. Replace TODOs with real calendarService
- *   methods that support session-aware operations or implement an outbox/reconciliation pattern.
- * - requestRepo and bidRepo must expose session-aware update methods for full transactional safety.
- * - bookingScheduler (Agenda wrapper) must be initialized at app startup and exposes scheduleHonorJob/cancelHonorJob.
+ * Notes:
+ * - calendarService is optional; when present it may be session-aware (calendarService.requiresSession).
+ * - messageRepo / comms-js are optional; delivery is best-effort and audited.
+ * - All messages created here are persisted and transitioned to status "submitted" before delivery.
  */
 
 const mongoose = require('mongoose');
@@ -23,48 +19,115 @@ const requestRepo = require('../repositories/request.repo');
 const bidRepo = require('../repositories/bid.repo');
 const auditService = require('./audit.service');
 
-// Scheduler utilities (Agenda wrapper). Ensure init() is called at app startup.
+// Scheduler utilities (Agenda wrapper)
 const { scheduleHonorJob, cancelHonorJob } = require('../jobs/bookingScheduler');
 
-// TODO: Implement calendarService with session-aware methods:
-// - checkAvailability({ type, id, slots }, { session }) => { available: true/false, conflicts: [...] }
-// - reserveTentativeSlots({ type, id, slots, metadata }, { session }) => { reservationToken }
-// - confirmSlots({ reservationToken, bookingId }, { session })
-// - releaseTentativeSlots({ reservationToken })
+// Optional integrations (defensive requires)
 let calendarService;
-try {
-  // attempt to require; if not present, leave undefined and use TODO flow
-  calendarService = require('./calendar.service');
-} catch (e) {
-  calendarService = null;
-}
+try { calendarService = require('./calendar.service'); } catch (e) { calendarService = null; }
 
-/**
- * Helper: normalize payload slots to array of {from:Number,to:Number}
- */
+let messageRepo;
+try { messageRepo = require('../repositories/message.repo'); } catch (e) { messageRepo = null; }
+
+let MessageModel;
+try { MessageModel = require('../models/message.model'); } catch (e) { MessageModel = null; }
+
+let commsJs;
+try { commsJs = require('../comms-js'); } catch (e) { commsJs = null; }
+
+/* -------------------------
+ * Helpers
+ * ------------------------- */
+
 function normalizeSlots(slots) {
   if (!Array.isArray(slots)) return [];
   return slots.map(s => ({ from: Number(s.from), to: Number(s.to) }));
 }
 
-/**
+function actorContext(actor) {
+  return { userId: actor && actor.userId ? actor.userId : null, role: actor && actor.role ? actor.role : null };
+}
+
+function buildRecipientsFromBooking(booking) {
+  const recipients = [];
+  if (booking.seeker_id) recipients.push(booking.seeker_id);
+  if (booking.provider_id && booking.provider_id !== booking.seeker_id) recipients.push(booking.provider_id);
+  return recipients;
+}
+
+async function persistAndSubmitMessage(payload, actorCtx, correlationId = null) {
+  // Persist message (idempotent when repo supports idempotency) and ensure status is 'submitted'
+  let messageDoc = null;
+
+  if (messageRepo && typeof messageRepo.createMessage === 'function') {
+    try {
+      messageDoc = await messageRepo.createMessage(payload);
+      // If repo returned a plain object (lean), try to load instance to call helper
+      if (messageDoc && typeof messageDoc.markSubmitted !== 'function' && messageDoc._id) {
+        try {
+          const Message = require('../models/message.model');
+          messageDoc = await Message.findById(messageDoc._id).exec();
+        } catch (_) { /* ignore */ }
+      }
+      if (messageDoc && typeof messageDoc.markSubmitted === 'function') {
+        try { await messageDoc.markSubmitted({ sentAt: new Date() }); } catch (_) { /* ignore */ }
+      } else {
+        // fallback: ensure persisted status via repo update
+        try {
+          if (messageDoc && messageDoc._id && typeof messageRepo.updateMessage === 'function') {
+            await messageRepo.updateMessage(messageDoc._id, { status: 'submitted', visible: true, 'metadata.sentAt': Date.now() });
+          }
+        } catch (_) { /* ignore */ }
+      }
+    } catch (err) {
+      await auditService.logEvent({
+        eventType: 'booking.message.create_failed',
+        actor: actorCtx,
+        target: { type: 'Message', id: payload && payload.metadata && payload.metadata.bookingId ? payload.metadata.bookingId : null },
+        outcome: 'failure',
+        severity: 'warning',
+        correlationId,
+        details: { error: err && err.message }
+      });
+      messageDoc = null;
+    }
+  }
+
+  if (!messageDoc && MessageModel && typeof MessageModel.buildDraft === 'function') {
+    try {
+      const draft = MessageModel.buildDraft(Object.assign({}, payload, { status: 'draft' }));
+      messageDoc = await draft.save();
+      if (messageDoc && typeof messageDoc.markSubmitted === 'function') {
+        try { await messageDoc.markSubmitted({ sentAt: new Date() }); } catch (_) { /* ignore */ }
+      } else {
+        // fallback: update via repo if available
+        if (messageDoc && messageDoc._id && messageRepo && typeof messageRepo.updateMessage === 'function') {
+          try { await messageRepo.updateMessage(messageDoc._id, { status: 'submitted', visible: true, 'metadata.sentAt': Date.now() }); } catch (_) { /* ignore */ }
+        }
+      }
+    } catch (err) {
+      await auditService.logEvent({
+        eventType: 'booking.message.model_failed',
+        actor: actorCtx,
+        target: { type: 'Message', id: payload && payload.metadata && payload.metadata.bookingId ? payload.metadata.bookingId : null },
+        outcome: 'failure',
+        severity: 'warning',
+        correlationId,
+        details: { error: err && err.message }
+      });
+      messageDoc = null;
+    }
+  }
+
+  return messageDoc;
+}
+
+/* -------------------------
  * createBookingTransactional
- * - Validates payload
- * - Checks request status
- * - Checks calendar availability (service calendars first, then provider)
- * - Creates booking record inside a transaction
- * - Updates request.status to 'booked' inside the same transaction
- * - Updates bid statuses (accepted/rejected) inside the same transaction
- * - Confirms calendar slots (transactional if calendarService supports session)
- * - Commits transaction, schedules honor job post-commit, sends notifications (best-effort)
- *
- * @param {Object} actor - { userId, role }
- * @param {Object} payload - { requestId, bidId, seekerId, providerId, quoteAmount, currency, services, slots, notes, metadata }
- * @param {String|null} correlationId
- * @returns {Promise<Object>} booking document
- */
+ * ------------------------- */
+
 async function createBookingTransactional(actor, payload, correlationId = null) {
-  const actorCtx = { userId: actor && actor.userId, role: actor && actor.role };
+  const actorCtx = actorContext(actor);
 
   // Basic validation
   if (!payload || !payload.requestId || !payload.providerId || !payload.seekerId || !Array.isArray(payload.slots) || payload.slots.length === 0) {
@@ -73,7 +136,6 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
     throw err;
   }
 
-  // Normalize slots
   payload.slots = normalizeSlots(payload.slots);
 
   // Load request and ensure it's active
@@ -89,49 +151,54 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
     throw err;
   }
 
-  // Determine calendar targets: prefer service calendars if services provided, otherwise provider calendar
+  // Determine calendar targets
   const serviceIds = Array.isArray(payload.services) ? payload.services.filter(Boolean) : [];
   const calendarTargets = serviceIds.length > 0
     ? serviceIds.map(sid => ({ type: 'service', id: sid }))
     : [{ type: 'provider', id: payload.providerId }];
 
-  // Pre-check calendar availability (best-effort) if calendarService exists and does not require session
-  if (calendarService && typeof calendarService.checkAvailability === 'function' && !calendarService.requiresSession) {
+  // Pre-check availability (best-effort) when calendarService exists and is non-session
+  if (calendarService && typeof calendarService.checkRangeAvailability === 'function' && !calendarService.requiresSession) {
     for (const target of calendarTargets) {
-      const avail = await calendarService.checkAvailability({ type: target.type, id: target.id, slots: payload.slots });
-      if (!avail || !avail.available) {
-        const err = new Error('Requested slots are not available on the calendar');
-        err.status = 409;
-        await auditService.logEvent({
-          eventType: 'booking.create.failed.calendar_conflict',
-          actor: actorCtx,
-          target: { type: target.type, id: target.id },
-          outcome: 'failure',
-          severity: 'warning',
-          correlationId,
-          details: { conflicts: avail && avail.conflicts }
-        });
-        throw err;
+      const ownerId = target.type === 'provider' ? target.id : null;
+      const serviceId = target.type === 'service' ? target.id : null;
+      for (const s of payload.slots) {
+        const avail = await calendarService.checkRangeAvailability({ ownerId, serviceId, fromEpoch: s.from, toEpoch: s.to, capacityNeeded: payload.capacityNeeded || 1 });
+        if (!avail || !avail.ok) {
+          const err = new Error('Requested slots are not available on the calendar');
+          err.status = 409;
+          await auditService.logEvent({
+            eventType: 'booking.create.failed.calendar_conflict',
+            actor: actorCtx,
+            target: { type: target.type, id: target.id },
+            outcome: 'failure',
+            severity: 'warning',
+            correlationId,
+            details: { conflicts: avail && avail.conflicts }
+          });
+          throw err;
+        }
       }
     }
   }
 
   const session = await mongoose.startSession();
   let booking;
-  let reservations = [];
+  const reservations = [];
+
   try {
     session.startTransaction();
 
     // If calendarService supports session-aware tentative reservations, reserve them now
     if (calendarService && typeof calendarService.reserveTentativeSlots === 'function' && calendarService.requiresSession) {
       for (const target of calendarTargets) {
-        const reservation = await calendarService.reserveTentativeSlots({
+        const res = await calendarService.reserveTentativeSlots({
           type: target.type,
           id: target.id,
           slots: payload.slots,
           metadata: { requestId: payload.requestId, bidId: payload.bidId || null }
         }, { session });
-        reservations.push(reservation);
+        reservations.push(res);
       }
     }
 
@@ -152,15 +219,14 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
 
     booking = await bookingRepo.createWithSession(bookingObj, session);
 
-    // Update request status to 'booked' inside transaction (session-aware if available)
+    // Update request status inside transaction
     if (typeof requestRepo.updateByIdWithSession === 'function') {
       await requestRepo.updateByIdWithSession(request._id, { status: 'booked' }, session);
     } else {
-      // fallback: non-session update (less safe for races)
       await requestRepo.updateById(request._id, { status: 'booked', updatedAt: Date.now() });
     }
 
-    // Update accepted bid and other bids
+    // Update bid(s)
     if (payload.bidId) {
       if (typeof bidRepo.updateByIdWithSession === 'function') {
         await bidRepo.updateByIdWithSession(payload.bidId, { status: 'accepted' }, session);
@@ -168,44 +234,44 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
         await bidRepo.updateById(payload.bidId, { status: 'accepted' });
       }
 
-      // Reject other submitted bids for the same request (session-aware if repo supports it)
-      if (typeof bidRepo.updateManyWithSession === 'function') {
-        await bidRepo.updateManyWithSession({ request_id: payload.requestId, status: 'submitted', archived: false, _id: { $ne: payload.bidId } }, { status: 'rejected' }, session);
-      } else {
-        await bidRepo.updateMany({ request_id: payload.requestId, status: 'submitted', archived: false, _id: { $ne: payload.bidId } }, { status: 'rejected' }, session);
+      const rejectFilter = { request_id: payload.requestId, status: 'submitted', archived: false, _id: { $ne: payload.bidId } };
+      if (typeof bidRepo.updateMany === 'function') {
+        if (typeof bidRepo.updateManyWithSession === 'function') {
+          await bidRepo.updateManyWithSession(rejectFilter, { status: 'rejected' }, session);
+        } else {
+          await bidRepo.updateMany(rejectFilter, { status: 'rejected' }, session);
+        }
       }
-
-      // Hard-delete draft bids for the request (session-aware)
+      // remove draft bids
       await mongoose.model('Bid').deleteMany({ request_id: payload.requestId, status: 'draft' }).session(session).exec();
     } else {
-      // No bid provided: still reject submitted bids and remove drafts
+      // no bid provided: reject submitted and remove drafts
+      const rejectFilter = { request_id: payload.requestId, status: 'submitted', archived: false };
       if (typeof bidRepo.updateManyWithSession === 'function') {
-        await bidRepo.updateManyWithSession({ request_id: payload.requestId, status: 'submitted', archived: false }, { status: 'rejected' }, session);
+        await bidRepo.updateManyWithSession(rejectFilter, { status: 'rejected' }, session);
       } else {
-        await bidRepo.updateMany({ request_id: payload.requestId, status: 'submitted', archived: false }, { status: 'rejected' }, session);
+        await bidRepo.updateMany(rejectFilter, { status: 'rejected' }, session);
       }
       await mongoose.model('Bid').deleteMany({ request_id: payload.requestId, status: 'draft' }).session(session).exec();
     }
 
     // Confirm calendar slots inside transaction if calendarService supports it
     if (calendarService && typeof calendarService.confirmSlots === 'function' && calendarService.requiresSession) {
-      for (const reservation of reservations) {
-        await calendarService.confirmSlots({ reservationToken: reservation.token, bookingId: booking._id.toString() }, { session });
+      for (const r of reservations) {
+        await calendarService.confirmSlots({ reservationToken: r.token, bookingId: booking._id.toString() }, { session });
       }
     }
 
     await session.commitTransaction();
     session.endSession();
 
-    // Post-commit: if calendarService did not participate in transaction, confirm or reconcile now
+    // Post-commit: confirm slots for non-session calendarService (best-effort)
     if (calendarService && typeof calendarService.confirmSlots === 'function' && !calendarService.requiresSession) {
-      // Best-effort confirmation; if it fails, schedule reconciliation/outbox
       try {
         for (const target of calendarTargets) {
           await calendarService.confirmSlots({ type: target.type, id: target.id, bookingId: booking._id.toString(), slots: booking.slots });
         }
       } catch (confirmErr) {
-        // Log and continue; reconciliation job should handle eventual consistency
         await auditService.logEvent({
           eventType: 'booking.calendar.confirm_failed',
           actor: actorCtx,
@@ -218,10 +284,10 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
       }
     }
 
-    // Schedule honor job (post-commit)
+    // Schedule honor job
     try {
       const endEpoch = (booking.slots && booking.slots.length) ? Math.max(...booking.slots.map(s => s.to)) : Date.now();
-      const BUFFER_MS = 60 * 1000; // 1 minute buffer
+      const BUFFER_MS = 60 * 1000;
       const runAt = endEpoch + BUFFER_MS;
       await scheduleHonorJob(booking._id.toString(), runAt, correlationId);
       await auditService.logEvent({
@@ -245,7 +311,7 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
       });
     }
 
-    // Post-commit: audit and notifications (best-effort)
+    // Post-commit: audit
     await auditService.logEvent({
       eventType: 'booking.create',
       actor: actorCtx,
@@ -256,21 +322,86 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
       details: { requestId: payload.requestId, providerId: payload.providerId, calendarTargets }
     });
 
-    // TODO: notificationService.notifyUser for provider and seeker
+    // Create and deliver message to involved parties (best-effort) and request email channel
+    try {
+      const subject = `Booking ${booking.booking_id || booking._id.toString()} confirmed`;
+      const details = `Booking ${booking.booking_id || booking._id.toString()} has been created. Provider: ${booking.provider_id}, Seeker: ${booking.seeker_id}.`;
+
+      const recipients = buildRecipientsFromBooking(booking);
+
+      const msgPayload = {
+        type: 'booking',
+        recipientsAll: false,
+        recipients,
+        userId: actor && actor.userId ? actor.userId : null,
+        serviceId: (Array.isArray(booking.services) && booking.services.length) ? booking.services[0] : null,
+        subject,
+        details,
+        attachments: [],
+        idempotencyKey: `booking_create_${booking._id.toString()}`,
+        metadata: Object.assign({}, booking.metadata || {}, { bookingId: booking._id.toString(), channels: ['email', 'in_app'] })
+      };
+
+      const messageDoc = await persistAndSubmitMessage(msgPayload, actorCtx, correlationId);
+
+      if (commsJs && typeof commsJs.deliverMessage === 'function' && messageDoc && messageDoc._id) {
+        try {
+          await commsJs.deliverMessage(messageDoc._id, { actor: actorCtx, logger: console, correlationId, asyncBroadcast: true });
+          await auditService.logEvent({
+            eventType: 'booking.message.delivered',
+            actor: actorCtx,
+            target: { type: 'Message', id: messageDoc._id.toString() },
+            outcome: 'success',
+            severity: 'info',
+            correlationId,
+            details: { bookingId: booking._id.toString() }
+          });
+        } catch (deliverErr) {
+          await auditService.logEvent({
+            eventType: 'booking.message.deliver_failed',
+            actor: actorCtx,
+            target: { type: 'Message', id: messageDoc._id ? messageDoc._id.toString() : null },
+            outcome: 'failure',
+            severity: 'warning',
+            correlationId,
+            details: { error: deliverErr && deliverErr.message ? deliverErr.message : String(deliverErr) }
+          });
+        }
+      } else {
+        await auditService.logEvent({
+          eventType: 'booking.message.deliver_skipped',
+          actor: actorCtx,
+          target: { type: 'Booking', id: booking._id.toString() },
+          outcome: 'info',
+          severity: 'info',
+          correlationId,
+          details: { reason: 'comms-js or message not available' }
+        });
+      }
+    } catch (err) {
+      await auditService.logEvent({
+        eventType: 'booking.notification.error',
+        actor: actorCtx,
+        target: { type: 'Booking', id: booking._id.toString() },
+        outcome: 'failure',
+        severity: 'warning',
+        correlationId,
+        details: { error: err && err.message }
+      });
+    }
 
     return booking;
   } catch (e) {
-    try { await session.abortTransaction(); } catch (er) { /* ignore */ }
+    try { await session.abortTransaction(); } catch (_) { /* ignore */ }
     session.endSession();
 
-    // Release tentative reservations if any were created outside transaction or not confirmed
+    // Release tentative reservations if any
     if (calendarService && typeof calendarService.releaseTentativeSlots === 'function' && reservations && reservations.length) {
       try {
         for (const r of reservations) {
           await calendarService.releaseTentativeSlots({ reservationToken: r.token });
         }
       } catch (releaseErr) {
-        // log and continue
         await auditService.logEvent({
           eventType: 'booking.calendar.release_failed',
           actor: actorCtx,
@@ -290,27 +421,19 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
       outcome: 'failure',
       severity: 'error',
       correlationId,
-      details: { error: e && e.message, calendarTargets }
+      details: { error: e && e.message }
     });
 
     throw e;
   }
 }
 
-/**
+/* -------------------------
  * cancelBooking
- * - Permission: seeker, provider, or admin
- * - Updates booking status to seeker_cancelled or provider_cancelled (or suspended for admin)
- * - Cancels scheduled honor job
- * - Releases calendar slots (best-effort)
- *
- * @param {Object} actor
- * @param {String} bookingId
- * @param {String} reason
- * @param {String|null} correlationId
- */
+ * ------------------------- */
+
 async function cancelBooking(actor, bookingId, reason = '', correlationId = null) {
-  const actorCtx = { userId: actor && actor.userId, role: actor && actor.role };
+  const actorCtx = actorContext(actor);
   const booking = await bookingRepo.findById(bookingId);
   if (!booking) {
     const err = new Error('Booking not found');
@@ -327,12 +450,28 @@ async function cancelBooking(actor, bookingId, reason = '', correlationId = null
     throw err;
   }
 
+  // If already cancelled/suspended, return as-is
   if (['seeker_cancelled', 'provider_cancelled', 'suspended'].includes(booking.status)) {
     return booking;
   }
 
   const newStatus = isSeeker ? 'seeker_cancelled' : (isProvider ? 'provider_cancelled' : 'suspended');
-  const updated = await bookingRepo.updateById(booking._id || bookingId, { status: newStatus, metadata: Object.assign({}, booking.metadata || {}, { cancelledBy: actor.userId, reason }) });
+
+  // Append cancellation metadata while preserving existing metadata
+  const cancellationMeta = Object.assign({}, booking.metadata || {});
+  cancellationMeta.lastCancellation = {
+    at: Date.now(),
+    by: actor && actor.userId ? actor.userId : null,
+    role: actor && actor.role ? actor.role : null,
+    reason: reason || null
+  };
+
+  // Persist status change (applies whether booking is past or future)
+  const updated = await bookingRepo.updateById(booking._id || bookingId, {
+    status: newStatus,
+    metadata: cancellationMeta,
+    updatedAt: Date.now()
+  });
 
   // Cancel scheduled honor job (best-effort)
   try {
@@ -358,20 +497,152 @@ async function cancelBooking(actor, bookingId, reason = '', correlationId = null
     });
   }
 
-  // Release calendar slots (best-effort)
+  // If booking end is in the future, remove booking from calendars (best-effort).
   try {
-    if (calendarService && typeof calendarService.releaseSlots === 'function') {
-      await calendarService.releaseSlots({ providerId: booking.provider_id, bookingId: booking._id.toString(), slots: booking.slots });
+    const lastSlotTo = (booking.slots && booking.slots.length) ? Math.max(...booking.slots.map(s => s.to)) : null;
+    const now = Date.now();
+    if (lastSlotTo && lastSlotTo > now) {
+      const targets = (Array.isArray(booking.services) && booking.services.length > 0)
+        ? booking.services.map(sid => ({ type: 'service', id: sid }))
+        : [{ type: 'provider', id: booking.provider_id }];
+
+      for (const t of targets) {
+        if (calendarService && typeof calendarService.removeBooking === 'function') {
+          try {
+            await calendarService.removeBooking({ type: t.type, id: t.id, bookingId: booking._id.toString(), slots: booking.slots });
+            await auditService.logEvent({
+              eventType: 'booking.calendar.removed',
+              actor: actorCtx,
+              target: { type: t.type, id: t.id },
+              outcome: 'success',
+              severity: 'info',
+              correlationId,
+              details: { bookingId: booking._id.toString() }
+            });
+          } catch (err) {
+            await auditService.logEvent({
+              eventType: 'booking.calendar.remove_failed',
+              actor: actorCtx,
+              target: { type: t.type, id: t.id },
+              outcome: 'failure',
+              severity: 'warning',
+              correlationId,
+              details: { error: err && err.message }
+            });
+          }
+        } else if (calendarService && typeof calendarService.releaseTentativeSlots === 'function') {
+          try {
+            await calendarService.releaseTentativeSlots({ reservationToken: booking._id.toString() });
+            await auditService.logEvent({
+              eventType: 'booking.calendar.released',
+              actor: actorCtx,
+              target: { type: t.type, id: t.id },
+              outcome: 'success',
+              severity: 'info',
+              correlationId,
+              details: { bookingId: booking._id.toString() }
+            });
+          } catch (err) {
+            await auditService.logEvent({
+              eventType: 'booking.calendar.release_failed',
+              actor: actorCtx,
+              target: { type: t.type, id: t.id },
+              outcome: 'failure',
+              severity: 'warning',
+              correlationId,
+              details: { error: err && err.message }
+            });
+          }
+        } else {
+          await auditService.logEvent({
+            eventType: 'booking.calendar.noop',
+            actor: actorCtx,
+            target: { type: t.type, id: t.id },
+            outcome: 'info',
+            severity: 'info',
+            correlationId,
+            details: { message: 'No calendar API available to remove booking' }
+          });
+        }
+      }
     }
-  } catch (releaseErr) {
+  } catch (err) {
     await auditService.logEvent({
-      eventType: 'booking.calendar.release_failed',
+      eventType: 'booking.calendar.cleanup_error',
       actor: actorCtx,
       target: { type: 'Booking', id: booking._id.toString() },
       outcome: 'failure',
       severity: 'warning',
       correlationId,
-      details: { error: releaseErr && releaseErr.message }
+      details: { error: err && err.message }
+    });
+  }
+
+  // Create and deliver message to involved parties (best-effort)
+  try {
+    const subject = `Booking ${booking.booking_id || booking._id.toString()} cancelled`;
+    const details = `Booking ${booking.booking_id || booking._id.toString()} has been cancelled by ${actor && actor.userId ? actor.userId : 'system'}. Reason: ${reason || 'not provided'}.`;
+
+    const recipients = buildRecipientsFromBooking(booking);
+
+    const msgPayload = {
+      type: 'booking',
+      recipientsAll: false,
+      recipients,
+      userId: actor && actor.userId ? actor.userId : null,
+      serviceId: (Array.isArray(booking.services) && booking.services.length) ? booking.services[0] : null,
+      subject,
+      details,
+      attachments: [],
+      idempotencyKey: `booking_cancel_${booking._id.toString()}`,
+      metadata: Object.assign({}, booking.metadata || {}, { bookingId: booking._id.toString(), cancelledBy: actor && actor.userId ? actor.userId : null, channels: ['email', 'in_app'] })
+    };
+
+    const messageDoc = await persistAndSubmitMessage(msgPayload, actorCtx, correlationId);
+
+    if (commsJs && typeof commsJs.deliverMessage === 'function' && messageDoc && messageDoc._id) {
+      try {
+        await commsJs.deliverMessage(messageDoc._id, { actor: actorCtx, logger: console, correlationId, asyncBroadcast: true });
+        await auditService.logEvent({
+          eventType: 'booking.message.delivered',
+          actor: actorCtx,
+          target: { type: 'Message', id: messageDoc._id.toString() },
+          outcome: 'success',
+          severity: 'info',
+          correlationId,
+          details: { bookingId: booking._id.toString() }
+        });
+      } catch (deliverErr) {
+        await auditService.logEvent({
+          eventType: 'booking.message.deliver_failed',
+          actor: actorCtx,
+          target: { type: 'Message', id: messageDoc._id ? messageDoc._id.toString() : null },
+          outcome: 'failure',
+          severity: 'warning',
+          correlationId,
+          details: { error: deliverErr && deliverErr.message ? deliverErr.message : String(deliverErr) }
+        });
+      }
+    } else {
+      await auditService.logEvent({
+        eventType: 'booking.message.deliver_skipped',
+        actor: actorCtx,
+        target: { type: 'Booking', id: booking._id.toString() },
+        outcome: 'info',
+        severity: 'info',
+        correlationId,
+        details: { reason: 'comms-js or message not available' }
+      });
+    }
+  } catch (err) {
+    await auditService.logEvent({
+      eventType: 'booking.notification.error',
+      actor: actorCtx,
+      target: { type: 'Booking', id: booking._id.toString() },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: { error: err && err.message }
     });
   }
 
@@ -388,20 +659,15 @@ async function cancelBooking(actor, bookingId, reason = '', correlationId = null
   return updated;
 }
 
-/**
+/* -------------------------
  * updateBooking
- * - Controlled updates with RBAC for status transitions and slot changes.
- * - Admin may update arbitrary fields including suspend.
- * - Provider may mark honored (but honored is automated; provider can request manual override if business allows).
- * - If slots change, calendar availability must be checked (TODO).
- *
- * @param {Object} actor
- * @param {String} bookingId
- * @param {Object} patch
- * @param {String|null} correlationId
- */
+ * - Handles calendarService.checkRangeAvailability/reserveTentativeSlots and session-aware flow.
+ * - Non-disruptive: preserves RBAC and existing behavior; only adds guarded calendar checks/reservations.
+ * - Also creates and delivers a message to involved parties (best-effort) when update succeeds.
+ * ------------------------- */
+
 async function updateBooking(actor, bookingId, patch = {}, correlationId = null) {
-  const actorCtx = { userId: actor && actor.userId, role: actor && actor.role };
+  const actorCtx = actorContext(actor);
   const booking = await bookingRepo.findById(bookingId);
   if (!booking) {
     const err = new Error('Booking not found');
@@ -409,12 +675,9 @@ async function updateBooking(actor, bookingId, patch = {}, correlationId = null)
     throw err;
   }
 
-  // Allowed fields to update
   const allowedFields = ['what', 'where', 'slots', 'services', 'quote_amount', 'currency', 'description', 'status', 'metadata'];
   const update = {};
-  allowedFields.forEach(k => {
-    if (k in patch) update[k] = patch[k];
-  });
+  allowedFields.forEach(k => { if (k in patch) update[k] = patch[k]; });
 
   if (Object.keys(update).length === 0) return booking;
 
@@ -443,7 +706,6 @@ async function updateBooking(actor, bookingId, patch = {}, correlationId = null)
       throw err;
     }
     if (newStatus === 'honored' && !isAdmin) {
-      // honored is automated; only admin may force it manually
       const err = new Error('Only administrators may manually mark booking honored');
       err.status = 403;
       throw err;
@@ -455,14 +717,162 @@ async function updateBooking(actor, bookingId, patch = {}, correlationId = null)
     }
   }
 
-  // If slots are being changed, check calendar availability (TODO)
+  // If slots are being changed, handle calendar checks/reservations (session-aware when possible)
+  let tentativeReservations = [];
+  let reservationTokens = [];
+  let session = null;
+  let usedSession = false;
+
   if ('slots' in update) {
     update.slots = normalizeSlots(update.slots);
-    // TODO: call calendarService.checkAvailability/reserveTentativeSlots and handle session if needed.
-    // If calendarService is not transactional, consider scheduling reconciliation and notifying stakeholders.
+
+    // Determine calendar targets for this booking (services preferred)
+    const targets = (Array.isArray(update.services) && update.services.length > 0)
+      ? update.services.map(sid => ({ type: 'service', id: sid }))
+      : (Array.isArray(booking.services) && booking.services.length > 0)
+        ? booking.services.map(sid => ({ type: 'service', id: sid }))
+        : [{ type: 'provider', id: booking.provider_id }];
+
+    try {
+      // If calendarService supports session-aware reservations, perform transaction
+      if (calendarService && typeof calendarService.reserveTentativeSlots === 'function' && calendarService.requiresSession) {
+        session = await mongoose.startSession();
+        usedSession = true;
+        session.startTransaction();
+
+        // Reserve tentative slots for each target within session
+        for (const t of targets) {
+          const res = await calendarService.reserveTentativeSlots({
+            type: t.type,
+            id: t.id,
+            slots: update.slots,
+            metadata: { bookingId: booking._id.toString(), updatedBy: actorCtx.userId || null }
+          }, { session });
+          tentativeReservations.push(res);
+        }
+
+        // Apply booking update inside same session (use session-aware repo if available)
+        if (typeof bookingRepo.updateByIdWithSession === 'function') {
+          await bookingRepo.updateByIdWithSession(booking._id || bookingId, update, session);
+        } else {
+          await mongoose.model('Booking').findByIdAndUpdate(booking._id || bookingId, { $set: update }, { new: true, session }).exec();
+        }
+
+        // Confirm tentative reservations inside session
+        if (calendarService && typeof calendarService.confirmSlots === 'function') {
+          for (const r of tentativeReservations) {
+            await calendarService.confirmSlots({ reservationToken: r.token, bookingId: booking._id.toString() }, { session });
+          }
+        }
+
+        await session.commitTransaction();
+        session.endSession();
+        usedSession = false;
+      } else if (calendarService && typeof calendarService.checkRangeAvailability === 'function') {
+        // Non-transactional flow: pre-check availability per target and reserve tentative slots (no session)
+        for (const t of targets) {
+          const ownerId = t.type === 'provider' ? t.id : null;
+          const serviceId = t.type === 'service' ? t.id : null;
+
+          // check each slot individually
+          for (const s of update.slots) {
+            const avail = await calendarService.checkRangeAvailability({ ownerId, serviceId, fromEpoch: s.from, toEpoch: s.to, capacityNeeded: 1 });
+            if (!avail || !avail.ok) {
+              const err = new Error('Requested slots are not available on the calendar');
+              err.status = 409;
+              await auditService.logEvent({
+                eventType: 'booking.update.failed.calendar_conflict',
+                actor: actorCtx,
+                target: { type: t.type, id: t.id },
+                outcome: 'failure',
+                severity: 'warning',
+                correlationId,
+                details: { conflicts: avail && avail.conflicts }
+              });
+              throw err;
+            }
+          }
+
+          // reserve tentative slots (best-effort)
+          try {
+            const res = await calendarService.reserveTentativeSlots({
+              type: t.type,
+              id: t.id,
+              slots: update.slots,
+              metadata: { bookingId: booking._id.toString(), updatedBy: actorCtx.userId || null }
+            }, {});
+            tentativeReservations.push(res);
+            if (res && res.token) reservationTokens.push(res.token);
+          } catch (err) {
+            // rollback any previously created tentative reservations
+            try {
+              for (const tok of reservationTokens) {
+                if (calendarService && typeof calendarService.releaseTentativeSlots === 'function') {
+                  await calendarService.releaseTentativeSlots({ reservationToken: tok });
+                }
+              }
+            } catch (_) { /* ignore */ }
+            throw err;
+          }
+        }
+
+        // Persist booking update (non-transactional)
+        await bookingRepo.updateById(booking._id || bookingId, update);
+
+        // Confirm tentative reservations (best-effort)
+        for (const r of tentativeReservations) {
+          try {
+            if (calendarService && typeof calendarService.confirmSlots === 'function') {
+              await calendarService.confirmSlots({ reservationToken: r.token, bookingId: booking._id.toString() }, {});
+            }
+          } catch (confirmErr) {
+            await auditService.logEvent({
+              eventType: 'booking.calendar.confirm_failed',
+              actor: actorCtx,
+              target: { type: 'Booking', id: booking._id.toString() },
+              outcome: 'failure',
+              severity: 'warning',
+              correlationId,
+              details: { error: confirmErr && confirmErr.message }
+            });
+            // do not throw; leave reconciliation to outbox
+          }
+        }
+      } else {
+        // No calendarService available: proceed with update (no checks)
+        await bookingRepo.updateById(booking._id || bookingId, update);
+      }
+    } catch (err) {
+      // rollback session if used
+      if (usedSession && session) {
+        try { await session.abortTransaction(); } catch (_) { /* ignore */ }
+        session.endSession();
+      }
+      // release tentative reservations if any (best-effort)
+      try {
+        for (const r of tentativeReservations) {
+          if (r && r.token && calendarService && typeof calendarService.releaseTentativeSlots === 'function') {
+            await calendarService.releaseTentativeSlots({ reservationToken: r.token });
+          }
+        }
+      } catch (_) { /* ignore */ }
+
+      await auditService.logEvent({
+        eventType: 'booking.update.failed.calendar',
+        actor: actorCtx,
+        target: { type: 'Booking', id: booking._id.toString() },
+        outcome: 'failure',
+        severity: 'warning',
+        correlationId,
+        details: { error: err && err.message }
+      });
+
+      throw err;
+    }
   }
 
-  const updated = await bookingRepo.updateById(booking._id || bookingId, update);
+  // If slots were not changed (or after successful slot handling), ensure we have the latest booking
+  const updated = await bookingRepo.findById(booking._id || bookingId);
 
   // If status changed away from active, cancel honor job
   if ('status' in update && update.status !== 'active') {
@@ -500,6 +910,74 @@ async function updateBooking(actor, bookingId, patch = {}, correlationId = null)
         details: { error: schedErr && schedErr.message }
       });
     }
+  }
+
+  // Create and deliver message to involved parties (best-effort)
+  try {
+    const subject = `Booking ${booking.booking_id || booking._id.toString()} updated`;
+    const details = `Booking ${booking.booking_id || booking._id.toString()} has been updated. Updated fields: ${Object.keys(update).join(', ')}`;
+
+    const recipients = buildRecipientsFromBooking(updated || booking);
+
+    const msgPayload = {
+      type: 'booking',
+      recipientsAll: false,
+      recipients,
+      userId: actor && actor.userId ? actor.userId : null,
+      serviceId: (Array.isArray(updated && updated.services) && updated.services.length) ? updated.services[0] : ((Array.isArray(booking.services) && booking.services.length) ? booking.services[0] : null),
+      subject,
+      details,
+      attachments: [],
+      idempotencyKey: `booking_update_${booking._id.toString()}_${Date.now()}`,
+      metadata: Object.assign({}, (updated && updated.metadata) || booking.metadata || {}, { bookingId: booking._id.toString(), channels: ['email', 'in_app'] })
+    };
+
+    const messageDoc = await persistAndSubmitMessage(msgPayload, actorCtx, correlationId);
+
+    if (commsJs && typeof commsJs.deliverMessage === 'function' && messageDoc && messageDoc._id) {
+      try {
+        await commsJs.deliverMessage(messageDoc._id, { actor: actorCtx, logger: console, correlationId, asyncBroadcast: true });
+        await auditService.logEvent({
+          eventType: 'booking.message.delivered',
+          actor: actorCtx,
+          target: { type: 'Message', id: messageDoc._id.toString() },
+          outcome: 'success',
+          severity: 'info',
+          correlationId,
+          details: { bookingId: booking._id.toString() }
+        });
+      } catch (deliverErr) {
+        await auditService.logEvent({
+          eventType: 'booking.message.deliver_failed',
+          actor: actorCtx,
+          target: { type: 'Message', id: messageDoc._id ? messageDoc._id.toString() : null },
+          outcome: 'failure',
+          severity: 'warning',
+          correlationId,
+          details: { error: deliverErr && deliverErr.message ? deliverErr.message : String(deliverErr) }
+        });
+      }
+    } else {
+      await auditService.logEvent({
+        eventType: 'booking.message.deliver_skipped',
+        actor: actorCtx,
+        target: { type: 'Booking', id: booking._id.toString() },
+        outcome: 'info',
+        severity: 'info',
+        correlationId,
+        details: { reason: 'comms-js or message not available' }
+      });
+    }
+  } catch (err) {
+    await auditService.logEvent({
+      eventType: 'booking.notification.error',
+      actor: actorCtx,
+      target: { type: 'Booking', id: booking._id.toString() },
+      outcome: 'failure',
+      severity: 'warning',
+      correlationId,
+      details: { error: err && err.message }
+    });
   }
 
   await auditService.logEvent({

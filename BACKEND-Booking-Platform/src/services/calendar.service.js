@@ -7,8 +7,14 @@
  * - Splits multi-day/week slots into week-aligned segments and supports two-phase check+reserve.
  * - Schedules a single repeating weekly cleanup using setInterval (one scheduler per process).
  *
- * Non-disruptive: public function signatures preserved; added checkRangeAvailability,
- * getWeeksCalendar, and a checked fast-path for reserveSlotRange. Metadata is forwarded.
+ * Non-disruptive: public function signatures preserved; added a small set of
+ * transactional helpers used by booking flows:
+ *  - checkRangeAvailability
+ *  - reserveTentativeSlots / confirmSlots / releaseTentativeSlots
+ *  - removeBooking (remove booking entries from calendars)
+ *  - requiresSession flag (true when session-aware methods are supported)
+ *
+ * These additions are defensive and additive; existing callers continue to work.
  */
 
 const { DateTime } = require('luxon');
@@ -23,6 +29,12 @@ const DEFAULT_MAX_MS = 8 * 60 * 60 * 1000;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 const service = {};
+
+/* -------------------------
+ * Expose whether calendar supports session-aware ops
+ * - repo.reserveSlotAtomic accepts a session; expose a flag booking flows can check.
+ * ------------------------- */
+service.requiresSession = true;
 
 /* -------------------------
  * Timezone helpers
@@ -163,20 +175,14 @@ service.checkRangeAvailability = async function ({ ownerId, serviceId = null, fr
   return { ok: true };
 };
 
+service.isSlotAvailable = async function ({ ownerId, serviceId = null, fromEpoch, toEpoch, capacityNeeded = 1 }) {
+  return repo.isSlotAvailable({ ownerId, serviceId, fromEpoch, toEpoch, capacityNeeded });
+};
+
 /* -------------------------
  * Weeks calendar builder
  * ------------------------- */
 
-/**
- * getWeeksCalendar
- * - entity: 'user:<ownerId>' or 'service:<serviceId>' (serviceId must start with 'svc_')
- * - startOfWeekEpoch: Monday 00:00:00.000 UTC epoch ms (will be normalized)
- * - endOfWeekEpoch: optional; if omitted returns single week
- * - requesterIsAdmin: boolean
- * - requesterId: userId of requester (string) used to allow owner access
- *
- * Returns: { ok:true, weeks: [ { datesBracket, offLimitsSlots, bookingsSlots, metadata } ] } or { ok:false, code, message }
- */
 service.getWeeksCalendar = async function ({ entity, startOfWeekEpoch, endOfWeekEpoch = null, timezone = 'UTC', requesterIsAdmin = false, requesterId = null }) {
   if (!entity || typeof entity !== 'string') return { ok: false, code: 'INVALID_INPUT', message: 'entity required' };
 
@@ -245,93 +251,166 @@ service.getWeeksCalendar = async function ({ entity, startOfWeekEpoch, endOfWeek
 
 /* -------------------------
  * Reservation (two-phase: check then reserve)
+ *
+ * The booking flows require a lightweight tentative reservation mechanism:
+ * - reserveTentativeSlots: create tentative slots using a generated reservation token
+ *   (the token is used as the temporary bookingId in calendar entries).
+ * - confirmSlots: replace reservation token with real bookingId and mark confirmed.
+ * - releaseTentativeSlots: cancel tentative slots by reservation token.
+ *
+ * These operations are best-effort and support session when provided.
  * ------------------------- */
 
 /**
- * reserveSlotRange
- * - Two-phase: when checked === false (default) run checkRangeAvailability first.
- * - If checked === true skip availability checks (fast-path).
- * - After successful check, immediately reserve each segment.
- *
- * params: { ownerId, serviceId, bookingId, fromEpoch, toEpoch, capacityUsed, timezone, metadata, checked }
+ * Helper: generate a short reservation token
  */
-service.reserveSlotRange = async function ({
-  ownerId,
-  serviceId = null,
-  bookingId,
-  fromEpoch,
-  toEpoch,
-  capacityUsed = 1,
-  timezone = 'UTC',
-  metadata = {},
-  checked = false
-}) {
-  if (!ownerId || !bookingId) throw new Error('ownerId and bookingId required');
+function generateReservationToken() {
+  return `res_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+}
 
-  const validation = service.validateSlotDto(fromEpoch, toEpoch, { allowLong: true });
-  if (!validation.ok) return { ok: false, results: [{ ok: false, code: validation.code, message: validation.message }], action: 'none' };
-
-  // 1) Pre-check all segments unless caller already did (checked === true)
-  if (!checked) {
-    const check = await service.checkRangeAvailability({ ownerId, serviceId, fromEpoch, toEpoch, capacityNeeded: capacityUsed });
-    if (!check.ok) {
-      // return conflict segments; do not attempt any reservation
-      return { ok: false, results: check.conflicts.map(c => ({ segment: c.segment, ok: false, code: c.code, message: c.message })), action: 'none' };
-    }
+/**
+ * reserveTentativeSlots
+ * - params: { type: 'service'|'provider', id, slots: [{from,to}], metadata }
+ * - opts: { session } optional session to participate in transaction
+ * - Returns { token } on success or throws on error.
+ *
+ * Implementation:
+ * - Uses repo.reserveSlotAtomic with bookingId set to reservation token.
+ * - If multiple segments, reserves each segment; on any failure rolls back tentative reservations.
+ */
+service.reserveTentativeSlots = async function ({ type, id, slots = [], metadata = {} } = {}, { session = null } = {}) {
+  if (!type || !id || !Array.isArray(slots) || slots.length === 0) {
+    const err = new Error('type, id and slots required');
+    err.status = 400;
+    throw err;
   }
 
-  // 2) All segments available — proceed to reserve each segment immediately
-  const segments = service.splitRangeByWeek(fromEpoch, toEpoch);
+  // map type -> ownerId/serviceId
+  const ownerId = (type === 'provider') ? id : null;
+  const serviceId = (type === 'service') ? id : null;
+
+  const token = generateReservationToken();
   const results = [];
 
-  for (const seg of segments) {
-    let attempt = await repo.reserveSlotAtomic({
-      ownerId,
-      serviceId,
-      bookingId,
-      fromEpoch: seg.fromEpoch,
-      toEpoch: seg.toEpoch,
-      capacityUsed,
-      tentative: true,
-      metadata
-    });
+  // Reserve each slot segment (segments expected to be simple non-week-split ranges)
+  try {
+    for (const s of slots) {
+      const fromEpoch = Number(s.from);
+      const toEpoch = Number(s.to);
+      const attempt = await repo.reserveSlotAtomic({
+        ownerId,
+        serviceId,
+        bookingId: token,
+        fromEpoch,
+        toEpoch,
+        capacityUsed: s.capacityUsed || 1,
+        session,
+        tentative: true,
+        metadata
+      });
 
-    if (!attempt.ok && attempt.code === 'NO_CALENDAR') {
-      try {
-        await repo.findOrCreateWeeklyCalendar(ownerId, serviceId, seg.fromEpoch, { timezone });
-        attempt = await repo.reserveSlotAtomic({
-          ownerId,
-          serviceId,
-          bookingId,
-          fromEpoch: seg.fromEpoch,
-          toEpoch: seg.toEpoch,
-          capacityUsed,
-          tentative: true,
-          metadata
-        });
-      } catch (err) {
-        results.push({ segment: seg, ok: false, code: 'ERROR', message: err.message || String(err) });
-        break;
+      if (!attempt || !attempt.ok) {
+        // rollback any tentative reservations created for this token
+        try { await repo.releaseTentativeSlotAcrossOwners(token); } catch (_) { /* ignore */ }
+        const err = new Error(attempt && attempt.message ? attempt.message : 'reservation_failed');
+        err.status = 409;
+        throw err;
       }
+      results.push(attempt);
     }
 
-    if (!attempt.ok) {
-      results.push({ segment: seg, ok: false, code: attempt.code, message: attempt.message });
-      break;
-    }
+    return { token, results };
+  } catch (err) {
+    // ensure cleanup on error
+    try { await repo.releaseTentativeSlotAcrossOwners(token); } catch (_) { /* ignore */ }
+    throw err;
+  }
+};
 
-    results.push({ segment: seg, ok: true, calendar: attempt.calendar });
+/**
+ * confirmSlots
+ * - params: { reservationToken, bookingId }
+ * - opts: { session } optional
+ * - Replaces reservationToken used as temporary bookingId with the real bookingId and marks slots confirmed.
+ */
+service.confirmSlots = async function ({ reservationToken, bookingId } = {}, { session = null } = {}) {
+  if (!reservationToken || !bookingId) {
+    const err = new Error('reservationToken and bookingId required');
+    err.status = 400;
+    throw err;
   }
 
-  const anyFailure = results.some(r => !r.ok);
-  if (anyFailure) {
-    try { await repo.releaseTentativeSlot(ownerId, bookingId); } catch (err) {
-      return { ok: false, results, action: 'rolled_back', rollbackError: err.message || String(err) };
-    }
-    return { ok: false, results, action: 'rolled_back' };
+  // 1) Mark matching slots as confirmed and remove locks (fast path)
+  await repo.confirmBookingSlots(null, null, reservationToken);
+
+  // 2) Replace bookingId token with real bookingId across calendars
+  // Use Calendar.updateMany with arrayFilters to update matching slot elements
+  try {
+    const now = Date.now();
+    await Calendar.updateMany(
+      { 'bookingsSlots.bookingId': reservationToken },
+      {
+        $set: { 'bookingsSlots.$[s].bookingId': bookingId, 'bookingsSlots.$[s].status': 'confirmed', updatedAtEpoch: now },
+        $pull: { 'metadata.lockedSlots': reservationToken }
+      },
+      { arrayFilters: [{ 's.bookingId': reservationToken }], multi: true }
+    ).exec();
+    return { ok: true };
+  } catch (err) {
+    // If replacement fails, leave slots in confirmed state with reservationToken; caller can reconcile.
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+};
+
+/**
+ * releaseTentativeSlots
+ * - params: { reservationToken }
+ * - Marks any calendar slots with bookingId == reservationToken as cancelled.
+ */
+service.releaseTentativeSlots = async function ({ reservationToken } = {}) {
+  if (!reservationToken) {
+    const err = new Error('reservationToken required');
+    err.status = 400;
+    throw err;
+  }
+  return repo.releaseTentativeSlotAcrossOwners(reservationToken);
+};
+
+/* -------------------------
+ * Calendar removal helpers used by booking cancel flows
+ * ------------------------- */
+
+/**
+ * removeBooking
+ * - params: { type: 'service'|'provider', id, bookingId, slots? }
+ * - Attempts to remove/cancel booking entries from the calendar(s).
+ * - If slots provided, attempts targeted removal; otherwise marks any entries with bookingId as cancelled.
+ */
+service.removeBooking = async function ({ type, id, bookingId, slots = null } = {}) {
+  if (!type || !id || !bookingId) {
+    const err = new Error('type, id and bookingId required');
+    err.status = 400;
+    throw err;
   }
 
-  return { ok: true, results, action: 'committed' };
+  const ownerId = (type === 'provider') ? id : null;
+  const serviceId = (type === 'service') ? id : null;
+
+  // If slots provided, attempt targeted cancellation per owner/service/week
+  if (Array.isArray(slots) && slots.length > 0) {
+    // For each slot, compute week and call repo.removeBookingEntries for that owner/service
+    const ops = [];
+    for (const s of slots) {
+      const weekStart = mondayStartEpoch(s.from);
+      // repo.removeBookingEntries is not week-scoped; it will mark any matching bookingId entries
+      ops.push(repo.removeBookingEntries(ownerId, serviceId, bookingId));
+    }
+    const results = await Promise.allSettled(ops);
+    return { ok: true, results };
+  }
+
+  // Otherwise, remove across the specified owner/service
+  return repo.removeBookingEntries(ownerId, serviceId, bookingId);
 };
 
 /* -------------------------

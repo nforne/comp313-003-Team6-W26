@@ -107,6 +107,22 @@ async function updateMany(filter, patch, session = null) {
 }
 
 /**
+ * Session-aware updateManyWithSession
+ * - Explicit helper used by transactional flows that always pass a session.
+ * - Non-disruptive: delegates to updateMany but requires a session parameter.
+ *
+ * @param {Object} filter
+ * @param {Object} patch
+ * @param {ClientSession} session
+ * @returns {Promise<UpdateWriteOpResult>}
+ */
+async function updateManyWithSession(filter, patch, session) {
+  if (!session) throw new Error('session required for updateManyWithSession');
+  patch.updatedAt = Date.now();
+  return Bid.updateMany(filter, { $set: patch }, { session }).exec();
+}
+
+/**
  * Soft-delete many bids by filter (archived=true, status='withdrawn').
  * @param {Object} filter
  * @param {ClientSession|null} session
@@ -140,6 +156,7 @@ module.exports = {
   softDeleteById,
   hardDeleteById,
   updateMany,
+  updateManyWithSession,
   softDeleteMany,
   findByRequest
 };

@@ -1,11 +1,17 @@
-// src/repositories/booking.repo.js
 /**
+ * src/repositories/booking.repo.js
+ *
  * Repository for Booking model
  * - CRUD wrappers
  * - Transaction-aware create/update helpers
  * - Pagination helpers
+ * - Conflict detection helpers returning minimal conflict info
  *
- * All functions return Promises.
+ * Non-disruptive: existing function names preserved; added small helpers:
+ *  - findByBookingId
+ *  - findConflictsByProvider (returns concise conflict records)
+ *  - cancelByBookingId (transaction-aware)
+ *  - listByService (new)
  */
 
 const Booking = require('../models/booking.model');
@@ -46,6 +52,16 @@ async function findById(idOrBookingId) {
   }
   // Fallback to booking_id field
   return Booking.findOne({ booking_id: idOrBookingId }).exec();
+}
+
+/**
+ * Convenience: find by booking_id (string).
+ * @param {String} bookingId
+ * @returns {Promise<Document|null>}
+ */
+async function findByBookingId(bookingId) {
+  if (!bookingId) return null;
+  return Booking.findOne({ booking_id: bookingId }).exec();
 }
 
 /**
@@ -112,25 +128,68 @@ async function listBySeeker(seekerId, { page = 1, pageSize = 20, status } = {}) 
 }
 
 /**
+ * List bookings by service with pagination and optional status filter.
+ * - Matches bookings where services array contains the provided serviceId.
+ * @param {String} serviceId
+ * @param {Object} opts
+ * @returns {Promise<Object>} { results, total, page, pageSize }
+ */
+async function listByService(serviceId, { page = 1, pageSize = 20, status } = {}) {
+  if (!serviceId) return { results: [], total: 0, page: Number(page), pageSize: Number(pageSize) };
+  const filter = { services: serviceId };
+  if (status) filter.status = status;
+  const skip = (page - 1) * pageSize;
+  const results = await Booking.find(filter).sort({ createdAt: -1 }).skip(skip).limit(pageSize).lean().exec();
+  const total = await Booking.countDocuments(filter).exec();
+  return { results, total, page, pageSize };
+}
+
+/**
  * Find bookings for a provider that overlap with any of the provided slots.
  * Useful for conflict checks before confirming a booking.
+ * Returns full booking docs (lean).
  * @param {String} providerId
  * @param {Array<{from:Number,to:Number}>} slots
  * @returns {Promise<Array>}
  */
 async function findOverlappingByProvider(providerId, slots = []) {
   if (!Array.isArray(slots) || slots.length === 0) return [];
-  // Build OR queries for each slot: existing.from < slot.to && existing.to > slot.from
+  // Use $elemMatch to find any booking with a slot that overlaps any requested slot.
   const orClauses = slots.map(s => ({
     provider_id: providerId,
-    $or: [
-      { 'slots.from': { $lt: s.to }, 'slots.to': { $gt: s.from } },
-      // For multi-slot bookings stored as arrays, use $elemMatch
-      { slots: { $elemMatch: { from: { $lt: s.to }, to: { $gt: s.from } } } }
-    ]
+    slots: { $elemMatch: { from: { $lt: s.to }, to: { $gt: s.from } } }
   }));
-  // Merge into a single query using $or
   return Booking.find({ $or: orClauses }).lean().exec();
+}
+
+/**
+ * Find concise conflict records for a provider and requested slots.
+ * - Returns array of { booking_id, _id, status, overlappingSlots: [{from,to}] }
+ * - Useful for returning minimal conflict info to callers.
+ */
+async function findConflictsByProvider(providerId, slots = []) {
+  if (!Array.isArray(slots) || slots.length === 0) return [];
+  const matches = await findOverlappingByProvider(providerId, slots);
+  if (!matches || matches.length === 0) return [];
+
+  // For each match, compute which slots overlap and return concise info
+  return matches.map(b => {
+    const overlappingSlots = [];
+    for (const s of (b.slots || [])) {
+      for (const req of slots) {
+        if (s.from < req.to && req.from < s.to) {
+          overlappingSlots.push({ from: s.from, to: s.to });
+          break;
+        }
+      }
+    }
+    return {
+      booking_id: b.booking_id,
+      _id: b._id,
+      status: b.status,
+      overlappingSlots
+    };
+  });
 }
 
 /**
@@ -149,6 +208,32 @@ async function countByProviderWindow(providerId, windowFrom = null, windowTo = n
 }
 
 /**
+ * Cancel a booking by booking_id or _id.
+ * - actor: { type: 'seeker'|'provider'|'admin', id: string }
+ * - reason: optional string
+ * - If session provided, operation runs in that session.
+ * @param {String} idOrBookingId
+ * @param {Object} actor
+ * @param {String} reason
+ * @param {ClientSession|null} session
+ * @returns {Promise<Document|null>}
+ */
+async function cancelById(idOrBookingId, actor = {}, reason = '', session = null) {
+  const doc = await findById(idOrBookingId);
+  if (!doc) return null;
+
+  // Use model instance method to centralize cancellation semantics
+  if (session) {
+    // reload document in session
+    const docInSession = await Booking.findById(doc._id).session(session).exec();
+    if (!docInSession) return null;
+    return docInSession.cancel(actor, reason);
+  }
+
+  return doc.cancel(actor, reason);
+}
+
+/**
  * Hard delete a booking by _id or booking_id.
  * @param {String} idOrBookingId
  * @returns {Promise<{deletedCount: number}>}
@@ -164,12 +249,16 @@ module.exports = {
   create,
   createWithSession,
   findById,
+  findByBookingId,
   findByRequest,
   updateById,
   updateByIdWithSession,
   listByProvider,
   listBySeeker,
+  listByService,
   findOverlappingByProvider,
+  findConflictsByProvider,
   countByProviderWindow,
+  cancelById,
   hardDeleteById
 };
