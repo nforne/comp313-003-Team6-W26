@@ -34,7 +34,9 @@ const reserveSchema = Joi.object({
   fromEpoch: epochMs.required(),
   toEpoch: epochMs.required(),
   capacityUsed: Joi.number().integer().min(1).default(1),
-  timezone: Joi.string().optional()
+  timezone: Joi.string().optional(),
+  metadata: Joi.object().optional().default({}),
+  checked: Joi.boolean().optional().default(false)
 }).custom((value, helpers) => {
   if (value.fromEpoch >= value.toEpoch) return helpers.error('any.invalid', { message: 'fromEpoch must be < toEpoch' });
   return value;
@@ -57,6 +59,30 @@ const defaultQuerySchema = Joi.object({
   dateEpoch: epochMs.optional(),
   timezone: Joi.string().optional()
 });
+
+/**
+ * weekscalendarSchema
+ * - Query: { entity: 'user:<id>'|'service:<id>', startOfWeekEpoch, endOfWeekEpoch?, timezone? }
+ * - Validates entity shape and ensures service ids start with 'svc_' when entity is service:...
+ */
+const weekscalendarSchema = Joi.object({
+  entity: Joi.string().required(),
+  startOfWeekEpoch: epochMs.required(),
+  endOfWeekEpoch: epochMs.optional(),
+  timezone: Joi.string().optional()
+}).custom((value, helpers) => {
+  const parts = String(value.entity || '').split(':');
+  if (parts.length !== 2) return helpers.error('any.invalid', { message: 'entity must be user:<id> or service:<id>' });
+  const [etype, eid] = parts;
+  if (etype !== 'user' && etype !== 'service') return helpers.error('any.invalid', { message: 'entity type must be user or service' });
+  if (etype === 'service' && !String(eid).startsWith('svc_')) {
+    return helpers.error('any.invalid', { message: 'service id must start with svc_' });
+  }
+  if (value.endOfWeekEpoch && value.endOfWeekEpoch < value.startOfWeekEpoch) {
+    return helpers.error('any.invalid', { message: 'endOfWeekEpoch must be >= startOfWeekEpoch' });
+  }
+  return value;
+}, 'entity and range check');
 
 /* -------------------------
  * Middleware factory
@@ -94,6 +120,7 @@ module.exports = {
   cleanupSchema,
   schedulerSchema,
   defaultQuerySchema,
+  weekscalendarSchema,
   // middleware
   validate
 };

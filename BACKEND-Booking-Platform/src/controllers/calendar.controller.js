@@ -11,6 +11,7 @@
  *  GET  /calendar/service/:serviceId/latest
  *  GET  /calendar/user/:ownerId/latest
  *  GET  /calendar/default
+ *  GET  /calendar/weekscalendar
  *  POST /calendar/availability
  *  POST /calendar/reserve
  *  POST /calendar/cleanup           (admin)
@@ -31,9 +32,6 @@ function jsonError(res, status = 400, code = 'INVALID', message = 'invalid reque
   return res.status(status).json({ ok: false, error: { code, message } });
 }
 
-/**
- * Read validated payload (set by validators middleware) or fallback to raw.
- */
 function validatedBody(req) {
   return (req.validated && req.validated.body) ? req.validated.body : (req.body || {});
 }
@@ -41,14 +39,6 @@ function validatedQuery(req) {
   return (req.validated && req.validated.query) ? req.validated.query : (req.query || {});
 }
 
-/**
- * Best-effort timezone detection:
- *  - prefer explicit header x-user-timezone
- *  - then query param timezone
- *  - then body.timezone
- *  - then best-effort from request IP (service.detectTimezoneFromIp)
- *  - fallback to 'UTC'
- */
 function detectTimezone(req) {
   const explicit =
     req.headers['x-user-timezone'] ||
@@ -64,12 +54,10 @@ function detectTimezone(req) {
   }
 }
 
-/* logger helper: prefer app logger if present */
 function loggerFor(req) {
   return (req.app && req.app.get && req.app.get('logger')) || console;
 }
 
-/* audit helper (best-effort) */
 async function auditLog(req, eventType, outcome, severity = 'info', details = {}) {
   try {
     await auditService.logEvent({
@@ -178,6 +166,57 @@ router.get('/default', async (req, res) => {
 });
 
 /**
+ * GET /calendar/weekscalendar
+ * Query: { entity: 'user:<id>'|'service:<id>', startOfWeekEpoch, endOfWeekEpoch?, timezone? }
+ *
+ * Notes:
+ * - requester must be authenticated (req.user) — controller is mounted under requireAuth in routes.
+ * - service enforces owner/admin rules for past weeks; controller passes requester context.
+ */
+router.get('/weekscalendar', async (req, res) => {
+  const log = loggerFor(req);
+  const correlationId = req.correlationId || null;
+  try {
+    const q = validatedQuery(req);
+    const entity = q.entity;
+    const startOfWeekEpoch = typeof q.startOfWeekEpoch === 'number' ? q.startOfWeekEpoch : (q.startOfWeekEpoch ? Number(q.startOfWeekEpoch) : null);
+    const endOfWeekEpoch = typeof q.endOfWeekEpoch === 'number' ? q.endOfWeekEpoch : (q.endOfWeekEpoch ? Number(q.endOfWeekEpoch) : null);
+    const timezone = q.timezone || detectTimezone(req);
+
+    if (!entity || typeof startOfWeekEpoch !== 'number') {
+      await auditLog(req, 'calendar.weekscalendar.failed.validation', 'failure', 'warning', { correlationId, details: { query: q } });
+      return jsonError(res, 400, 'INVALID_INPUT', 'entity and startOfWeekEpoch are required');
+    }
+
+    const requesterIsAdmin = !!(req.user && req.user.role === 'administrator');
+    const requesterId = req.user && req.user.userId ? req.user.userId : null;
+
+    log.info && log.info({ event: 'calendar.weekscalendar.request', entity, startOfWeekEpoch, endOfWeekEpoch, timezone, requesterIsAdmin, requesterId, correlationId });
+
+    const result = await service.getWeeksCalendar({
+      entity,
+      startOfWeekEpoch,
+      endOfWeekEpoch,
+      timezone,
+      requesterIsAdmin,
+      requesterId
+    });
+
+    if (!result || !result.ok) {
+      await auditLog(req, 'calendar.weekscalendar.failed', 'failure', 'warning', { correlationId, details: { entity, startOfWeekEpoch, endOfWeekEpoch, reason: result && result.message } });
+      return jsonError(res, 403, result && result.code ? result.code : 'FORBIDDEN', result && result.message ? result.message : 'forbidden');
+    }
+
+    await auditLog(req, 'calendar.weekscalendar.success', 'success', 'info', { entity, startOfWeekEpoch, weeks: result.weeks.length, correlationId });
+    return res.json({ ok: true, data: result.weeks, meta: { source: 'constructed_or_persisted' } });
+  } catch (err) {
+    log.error && log.error({ event: 'calendar.weekscalendar.error', error: err.message || String(err), correlationId });
+    await auditLog(req, 'calendar.weekscalendar.error', 'failure', 'error', { message: err.message, correlationId });
+    return jsonError(res, 500, 'ERROR', err.message || 'internal error');
+  }
+});
+
+/**
  * POST /calendar/availability
  * Body: { ownerId, serviceId?, fromEpoch, toEpoch, capacityNeeded?, timezone? }
  */
@@ -217,14 +256,27 @@ router.post('/availability', async (req, res) => {
 
 /**
  * POST /calendar/reserve
- * Body: { ownerId, serviceId?, bookingId, fromEpoch, toEpoch, capacityUsed?, timezone? }
+ * Body: { ownerId, serviceId?, bookingId, fromEpoch, toEpoch, capacityUsed?, timezone?, metadata?, checked? }
+ *
+ * Notes:
+ * - forwards optional metadata and checked flag to service.reserveSlotRange
+ * - checked=true skips the pre-check (fast-path) — caller must ensure they previously checked availability
  */
 router.post('/reserve', async (req, res) => {
   const log = loggerFor(req);
   const correlationId = req.correlationId || null;
   try {
     const b = validatedBody(req);
-    const { ownerId, serviceId = null, bookingId, fromEpoch, toEpoch, capacityUsed = 1 } = b;
+    const {
+      ownerId,
+      serviceId = null,
+      bookingId,
+      fromEpoch,
+      toEpoch,
+      capacityUsed = 1,
+      metadata = {},
+      checked = false
+    } = b;
     const timezone = detectTimezone(req);
 
     if (!ownerId || !bookingId || typeof fromEpoch !== 'number' || typeof toEpoch !== 'number') {
@@ -232,9 +284,9 @@ router.post('/reserve', async (req, res) => {
       return jsonError(res, 400, 'INVALID_INPUT', 'ownerId, bookingId, fromEpoch and toEpoch are required');
     }
 
-    log.info && log.info({ event: 'calendar.reserve.request', ownerId, serviceId, bookingId, fromEpoch, toEpoch, capacityUsed, timezone, correlationId });
+    log.info && log.info({ event: 'calendar.reserve.request', ownerId, serviceId, bookingId, fromEpoch, toEpoch, capacityUsed, timezone, checked, correlationId });
 
-    const payload = { ownerId, serviceId, bookingId, fromEpoch, toEpoch, capacityUsed, timezone };
+    const payload = { ownerId, serviceId, bookingId, fromEpoch, toEpoch, capacityUsed, timezone, metadata, checked };
     const result = await service.reserveSlotRange(payload);
 
     if (result.ok) {

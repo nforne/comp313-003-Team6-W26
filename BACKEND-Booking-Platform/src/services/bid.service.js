@@ -314,8 +314,11 @@ async function updateBid(actor, bidId, patch, correlationId = null) {
     try {
       session.startTransaction();
       /*
-        check the calendar first, do the booking and then update the calendar
-      
+        check the calendar first, 
+        if the requested slot is available, reserve it and make the booking simultainously
+        so that we do not have to hold the calendar for too long. 
+        After the calendar check for availability, trigger both events at the same time.
+        
       */
 
       // 1) Create booking (bookingService should accept session)

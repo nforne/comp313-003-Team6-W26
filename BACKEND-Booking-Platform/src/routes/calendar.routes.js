@@ -15,7 +15,7 @@
  *             GET  /user/:ownerId/latest
  *             GET  /default
  *             POST /availability
- *  - Auth required: POST /reserve
+ *  - Auth required: POST /reserve, GET /weekscalendar
  *  - Admin required: POST /cleanup, POST /cleanup/scheduler
  *
  * Note: this file wires validation middleware at the route level. The controller
@@ -33,7 +33,8 @@ const {
   reserveSchema,
   cleanupSchema,
   schedulerSchema,
-  defaultQuerySchema
+  defaultQuerySchema,
+  weekscalendarSchema
 } = require('../validators/calendar.validator');
 
 const router = express.Router();
@@ -50,7 +51,6 @@ router.get(
   '/service/:serviceId/latest',
   validate(defaultQuerySchema, 'query'),
   (req, res, next) => {
-    // make validated query available to controller in a familiar place
     if (req.validated && req.validated.query) req.query = Object.assign({}, req.query, req.validated.query);
     return next();
   },
@@ -104,6 +104,27 @@ router.post(
  * ------------------------- */
 
 /**
+ * GET /calendar/weekscalendar
+ * Query: { entity: 'user:<id>'|'service:<id>', startOfWeekEpoch, endOfWeekEpoch?, timezone? }
+ * Requires authentication (owner/admin checks enforced in service).
+ */
+router.get(
+  '/weekscalendar',
+  requireAuth,
+  validate(weekscalendarSchema, 'query'),
+  (req, res, next) => {
+    if (req.validated && req.validated.query) req.query = Object.assign({}, req.query, req.validated.query);
+    return next();
+  },
+  calendarController
+);
+
+
+/* -------------------------
+ * Admin routes
+ * ------------------------- */
+
+/**
  * POST /calendar/reserve
  * Requires authentication.
  * Body validated by reserveSchema.
@@ -111,6 +132,7 @@ router.post(
 router.post(
   '/reserve',
   requireAuth,
+  requireRole('administrator'),
   validate(reserveSchema, 'body'),
   (req, res, next) => {
     if (req.validated && req.validated.body) req.body = Object.assign({}, req.body, req.validated.body);
@@ -119,9 +141,6 @@ router.post(
   calendarController
 );
 
-/* -------------------------
- * Admin routes
- * ------------------------- */
 
 /**
  * POST /calendar/cleanup

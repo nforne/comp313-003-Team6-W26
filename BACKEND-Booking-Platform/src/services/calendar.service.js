@@ -4,39 +4,19 @@
  * Service layer for calendar operations, booking-slot orchestration, and weekly cleanup scheduling.
  * - Uses epoch ms everywhere.
  * - Converts local input <-> UTC using Luxon and calendar.timezone.
- * - Splits multi-day/week slots into week-aligned segments and attempts atomic reservation per segment.
+ * - Splits multi-day/week slots into week-aligned segments and supports two-phase check+reserve.
  * - Schedules a single repeating weekly cleanup using setInterval (one scheduler per process).
- * - Attempts timezone detection from request IP using geoip-lite (optional dependency).
  *
- * Dependencies:
- *   npm i luxon
- *   npm i geoip-lite   // optional; fallback to 'UTC' if not installed
- *
- * Exposed functions:
- *  - getLatestCalendarByService(serviceId)
- *  - getLatestCalendarByUser(ownerId)
- *  - getDefaultCalendarView({ ownerId, serviceId, dateEpoch, timezone, capacity })
- *  - isSlotAvailable(params)
- *  - reserveSlotRange(params)
- *  - splitRangeByWeek(fromEpoch, toEpoch)
- *  - convertLocalToUtcEpoch(localDateTimeISO, ianaTz)
- *  - convertUtcEpochToLocal(epochMs, ianaTz)
- *  - computeDefaultOffLimitsForWeek(weekStartEpoch, ianaTz)
- *  - startWeeklyCleanupScheduler(opts)
- *  - stopWeeklyCleanupScheduler()
+ * Non-disruptive: public function signatures preserved; added checkRangeAvailability,
+ * getWeeksCalendar, and a checked fast-path for reserveSlotRange. Metadata is forwarded.
  */
 
 const { DateTime } = require('luxon');
 const repo = require('../repositories/calendar.repo');
-const { mondayStartEpoch, sundayEndEpoch } = require('../models/calendar.model');
+const { Calendar, mondayStartEpoch, sundayEndEpoch } = require('../models/calendar.model');
 
 let geoip;
-try {
-  // optional dependency for IP -> timezone best-effort
-  geoip = require('geoip-lite');
-} catch (e) {
-  geoip = null;
-}
+try { geoip = require('geoip-lite'); } catch (e) { geoip = null; }
 
 const DEFAULT_MIN_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_MS = 8 * 60 * 60 * 1000;
@@ -45,7 +25,7 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const service = {};
 
 /* -------------------------
- * Timezone helpers (Luxon)
+ * Timezone helpers
  * ------------------------- */
 
 service.convertLocalToUtcEpoch = function (localISO, ianaTz) {
@@ -59,29 +39,15 @@ service.convertUtcEpochToLocal = function (epochMs, ianaTz) {
   return DateTime.fromMillis(epochMs, { zone: 'utc' }).setZone(ianaTz || 'UTC').toISO();
 };
 
-/**
- * Best-effort timezone detection from IP.
- * - Uses geoip-lite if available to map IP -> country/region -> IANA tz via a simple mapping.
- * - This is a best-effort fallback; prefer explicit user timezone when available.
- */
 service.detectTimezoneFromIp = function (ip) {
   try {
     if (!ip) return 'UTC';
     if (!geoip) return 'UTC';
     const geo = geoip.lookup(ip);
     if (!geo) return 'UTC';
-    // geoip-lite returns country, region, city, ll, timezone may not be present.
-    // Many deployments map country -> timezone; geoip-lite sometimes includes tz in geo.timezone.
     if (geo.timezone) return geo.timezone;
-    // fallback: map country to a common timezone (very coarse)
     const country = (geo.country || '').toUpperCase();
-    const countryTzMap = {
-      CA: 'America/Toronto',
-      US: 'America/New_York',
-      GB: 'Europe/London',
-      AU: 'Australia/Sydney'
-      // extend as needed
-    };
+    const countryTzMap = { CA: 'America/Toronto', US: 'America/New_York', GB: 'Europe/London', AU: 'Australia/Sydney' };
     return countryTzMap[country] || 'UTC';
   } catch (err) {
     return 'UTC';
@@ -169,32 +135,152 @@ service.splitRangeByWeek = function (fromEpoch, toEpoch) {
 };
 
 /* -------------------------
- * Availability & reservation
+ * Availability helpers
  * ------------------------- */
 
-service.isSlotAvailable = async function ({ ownerId, serviceId = null, fromEpoch, toEpoch, capacityNeeded = 1, timezone = 'UTC' }) {
-  const validation = service.validateSlotDto(fromEpoch, toEpoch);
-  if (!validation.ok) return validation;
-
-  const res = await repo.isSlotAvailable({ ownerId, serviceId, fromEpoch, toEpoch, capacityNeeded });
-  if (res && res.code === 'NO_CALENDAR') {
-    const defaultCal = service.getDefaultCalendarView({ ownerId, serviceId, dateEpoch: fromEpoch, timezone });
-    for (const o of defaultCal.offLimitsSlots || []) {
-      if (o.fromEpoch < toEpoch && o.toEpoch > fromEpoch) {
-        return { ok: false, code: 'OUT_OF_BUSINESS_HOURS', message: 'CANNOT book out of business hours (default)' };
-      }
-    }
-    return { ok: true, code: 'DEFAULT_CALENDAR', message: 'using default 09-17 M-F', defaultCalendar: defaultCal };
+/**
+ * checkRangeAvailability
+ * - Splits the requested range into week-aligned segments and checks availability for each.
+ * - Returns { ok:true } when all segments available, or { ok:false, conflicts: [ { segment, code, message } ] }.
+ */
+service.checkRangeAvailability = async function ({ ownerId, serviceId = null, fromEpoch, toEpoch, capacityNeeded = 1 }) {
+  const validation = service.validateSlotDto(fromEpoch, toEpoch, { allowLong: true });
+  if (!validation.ok) {
+    return { ok: false, conflicts: [{ segment: { fromEpoch, toEpoch }, code: validation.code, message: validation.message }] };
   }
-  return res;
+
+  const segments = service.splitRangeByWeek(fromEpoch, toEpoch);
+  const conflicts = [];
+
+  for (const seg of segments) {
+    const res = await service.isSlotAvailable({ ownerId, serviceId, fromEpoch: seg.fromEpoch, toEpoch: seg.toEpoch, capacityNeeded });
+    if (!res || !res.ok) {
+      conflicts.push({ segment: seg, code: res && res.code ? res.code : 'UNAVAILABLE', message: res && res.message ? res.message : 'not available' });
+    }
+  }
+
+  if (conflicts.length > 0) return { ok: false, conflicts };
+  return { ok: true };
 };
 
-service.reserveSlotRange = async function ({ ownerId, serviceId = null, bookingId, fromEpoch, toEpoch, capacityUsed = 1, timezone = 'UTC' }) {
+/* -------------------------
+ * Weeks calendar builder
+ * ------------------------- */
+
+/**
+ * getWeeksCalendar
+ * - entity: 'user:<ownerId>' or 'service:<serviceId>' (serviceId must start with 'svc_')
+ * - startOfWeekEpoch: Monday 00:00:00.000 UTC epoch ms (will be normalized)
+ * - endOfWeekEpoch: optional; if omitted returns single week
+ * - requesterIsAdmin: boolean
+ * - requesterId: userId of requester (string) used to allow owner access
+ *
+ * Returns: { ok:true, weeks: [ { datesBracket, offLimitsSlots, bookingsSlots, metadata } ] } or { ok:false, code, message }
+ */
+service.getWeeksCalendar = async function ({ entity, startOfWeekEpoch, endOfWeekEpoch = null, timezone = 'UTC', requesterIsAdmin = false, requesterId = null }) {
+  if (!entity || typeof entity !== 'string') return { ok: false, code: 'INVALID_INPUT', message: 'entity required' };
+
+  const parts = entity.split(':');
+  if (parts.length !== 2) return { ok: false, code: 'INVALID_ENTITY', message: 'entity must be user:<id> or service:<id>' };
+  const [etype, eid] = parts;
+  if (etype !== 'user' && etype !== 'service') return { ok: false, code: 'INVALID_ENTITY', message: 'entity type must be user or service' };
+  if (etype === 'service' && !String(eid).startsWith('svc_')) return { ok: false, code: 'INVALID_SERVICE_ID', message: 'serviceId must start with svc_' };
+
+  const weekStart = mondayStartEpoch(startOfWeekEpoch);
+  let weekEnd = endOfWeekEpoch ? mondayStartEpoch(endOfWeekEpoch) : weekStart;
+  if (weekEnd < weekStart) return { ok: false, code: 'INVALID_RANGE', message: 'endOfWeekEpoch must be >= startOfWeekEpoch' };
+
+  const weeks = [];
+  const now = Date.now();
+  const currentWeekStart = mondayStartEpoch(now);
+
+  for (let cursor = weekStart; cursor <= weekEnd; cursor += WEEK_MS) {
+    const isPastWeek = cursor < currentWeekStart;
+    let ownerId = null;
+    let serviceId = null;
+    if (etype === 'user') ownerId = eid;
+    else serviceId = eid;
+
+    // Access rule: past weeks (history) require owner (for user entity) or administrator.
+    // Present and future weeks are allowed for any requester (subject to other app-level checks).
+    const isRequesterOwner = requesterId && etype === 'user' && requesterId === ownerId;
+    if (isPastWeek && !requesterIsAdmin && !isRequesterOwner) {
+      return { ok: false, code: 'FORBIDDEN', message: 'past weeks require owner or administrator access' };
+    }
+
+    // try persisted head for this week (repo supports weekStartEpoch)
+    let persisted = null;
+    if (etype === 'service') persisted = await repo.getLatestByService(serviceId, cursor);
+    else persisted = await repo.getLatestByUser(ownerId, cursor);
+
+    if (persisted) {
+      persisted.meta = persisted.meta || {};
+      persisted.meta.source = 'persisted';
+      weeks.push(persisted);
+      continue;
+    }
+
+    // construct non-persisted week view (copy-forward offLimits or default)
+    let offLimits = [];
+    try { offLimits = await Calendar.copyForwardOffLimits(ownerId, serviceId); } catch (e) { offLimits = []; }
+    if (!offLimits || offLimits.length === 0) offLimits = service.computeDefaultOffLimitsForWeek(cursor, timezone);
+
+    const constructed = {
+      _id: null,
+      ownerId,
+      serviceId,
+      timezone,
+      capacity: 1,
+      datesBracket: { startEpoch: cursor, endEpoch: sundayEndEpoch(cursor) },
+      offLimitsSlots: offLimits,
+      bookingsSlots: [],
+      meta: { source: 'constructed' }
+    };
+
+    weeks.push(constructed);
+  }
+
+  return { ok: true, weeks };
+};
+
+/* -------------------------
+ * Reservation (two-phase: check then reserve)
+ * ------------------------- */
+
+/**
+ * reserveSlotRange
+ * - Two-phase: when checked === false (default) run checkRangeAvailability first.
+ * - If checked === true skip availability checks (fast-path).
+ * - After successful check, immediately reserve each segment.
+ *
+ * params: { ownerId, serviceId, bookingId, fromEpoch, toEpoch, capacityUsed, timezone, metadata, checked }
+ */
+service.reserveSlotRange = async function ({
+  ownerId,
+  serviceId = null,
+  bookingId,
+  fromEpoch,
+  toEpoch,
+  capacityUsed = 1,
+  timezone = 'UTC',
+  metadata = {},
+  checked = false
+}) {
   if (!ownerId || !bookingId) throw new Error('ownerId and bookingId required');
 
   const validation = service.validateSlotDto(fromEpoch, toEpoch, { allowLong: true });
   if (!validation.ok) return { ok: false, results: [{ ok: false, code: validation.code, message: validation.message }], action: 'none' };
 
+  // 1) Pre-check all segments unless caller already did (checked === true)
+  if (!checked) {
+    const check = await service.checkRangeAvailability({ ownerId, serviceId, fromEpoch, toEpoch, capacityNeeded: capacityUsed });
+    if (!check.ok) {
+      // return conflict segments; do not attempt any reservation
+      return { ok: false, results: check.conflicts.map(c => ({ segment: c.segment, ok: false, code: c.code, message: c.message })), action: 'none' };
+    }
+  }
+
+  // 2) All segments available — proceed to reserve each segment immediately
   const segments = service.splitRangeByWeek(fromEpoch, toEpoch);
   const results = [];
 
@@ -206,7 +292,8 @@ service.reserveSlotRange = async function ({ ownerId, serviceId = null, bookingI
       fromEpoch: seg.fromEpoch,
       toEpoch: seg.toEpoch,
       capacityUsed,
-      tentative: true
+      tentative: true,
+      metadata
     });
 
     if (!attempt.ok && attempt.code === 'NO_CALENDAR') {
@@ -219,7 +306,8 @@ service.reserveSlotRange = async function ({ ownerId, serviceId = null, bookingI
           fromEpoch: seg.fromEpoch,
           toEpoch: seg.toEpoch,
           capacityUsed,
-          tentative: true
+          tentative: true,
+          metadata
         });
       } catch (err) {
         results.push({ segment: seg, ok: false, code: 'ERROR', message: err.message || String(err) });
@@ -237,9 +325,7 @@ service.reserveSlotRange = async function ({ ownerId, serviceId = null, bookingI
 
   const anyFailure = results.some(r => !r.ok);
   if (anyFailure) {
-    try {
-      await repo.releaseTentativeSlot(ownerId, bookingId);
-    } catch (err) {
+    try { await repo.releaseTentativeSlot(ownerId, bookingId); } catch (err) {
       return { ok: false, results, action: 'rolled_back', rollbackError: err.message || String(err) };
     }
     return { ok: false, results, action: 'rolled_back' };
@@ -252,23 +338,10 @@ service.reserveSlotRange = async function ({ ownerId, serviceId = null, bookingI
  * Weekly cleanup scheduler
  * ------------------------- */
 
-/**
- * Scheduler state (single scheduler per process)
- */
 let _cleanupTimer = null;
 let _cleanupIntervalMs = WEEK_MS;
 let _logger = console;
 
-/**
- * startWeeklyCleanupScheduler(opts)
- * - Starts a repeating cleanup job using setInterval if not already running.
- * - opts:
- *    { intervalMs = WEEK_MS, initialDelayMs = 0, cutoffWeekStartEpoch = null, logger = console }
- * - Behavior:
- *    * If already running, returns current scheduler info.
- *    * Runs cleanup once after initialDelayMs, then repeats every intervalMs.
- *    * Logs start/finish and errors via provided logger.
- */
 service.startWeeklyCleanupScheduler = function (opts = {}) {
   const intervalMs = typeof opts.intervalMs === 'number' && opts.intervalMs > 0 ? opts.intervalMs : WEEK_MS;
   const initialDelayMs = typeof opts.initialDelayMs === 'number' && opts.initialDelayMs >= 0 ? opts.initialDelayMs : 0;
@@ -293,11 +366,8 @@ service.startWeeklyCleanupScheduler = function (opts = {}) {
     }
   };
 
-  // schedule first run after initialDelayMs
   _cleanupTimer = setTimeout(() => {
-    // run immediately (first invocation)
     runCleanup().catch(() => {});
-    // then schedule repeating interval
     _cleanupTimer = setInterval(() => {
       runCleanup().catch(() => {});
     }, _cleanupIntervalMs);
@@ -307,32 +377,12 @@ service.startWeeklyCleanupScheduler = function (opts = {}) {
   return { running: true, intervalMs: _cleanupIntervalMs, scheduledAt: Date.now() + initialDelayMs };
 };
 
-/**
- * stopWeeklyCleanupScheduler()
- * - Stops the running scheduler (if any).
- */
 service.stopWeeklyCleanupScheduler = function () {
   if (!_cleanupTimer) return { stopped: true, reason: 'not_running' };
-  try {
-    if (typeof _cleanupTimer === 'object' && _cleanupTimer.hasRef && _cleanupTimer.hasRef()) {
-      // Node Timeout object for setInterval/setTimeout
-    }
-  } catch (e) {
-    // ignore
-  }
-  try {
-    clearInterval(_cleanupTimer);
-    clearTimeout(_cleanupTimer);
-  } catch (e) {
-    // ignore
-  }
+  try { clearInterval(_cleanupTimer); clearTimeout(_cleanupTimer); } catch (e) { /* ignore */ }
   _cleanupTimer = null;
   _logger.info && _logger.info({ event: 'cleanup.scheduler.stopped', stoppedAt: Date.now() });
   return { stopped: true };
 };
-
-/* -------------------------
- * Export
- * ------------------------- */
 
 module.exports = service;

@@ -18,6 +18,7 @@
 
 const mongoose = require('mongoose');
 const { Schema } = mongoose;
+const BSON = require('bson');
 
 /* -------------------------
  * Helpers (epoch-based)
@@ -57,6 +58,24 @@ const OffLimitSlotSchema = new Schema(
   { _id: false }
 );
 
+// Validate off-limit slot ranges at subdocument level
+OffLimitSlotSchema.pre('validate', function (next) {
+  try {
+    if (typeof this.fromEpoch !== 'number' || typeof this.toEpoch !== 'number') {
+      return next(new Error('OffLimitSlot.fromEpoch and toEpoch must be numbers (epoch ms)'));
+    }
+    if (this.fromEpoch >= this.toEpoch) {
+      return next(new Error('OffLimitSlot.fromEpoch must be less than toEpoch'));
+    }
+    if (this.weekday < 1 || this.weekday > 7) {
+      return next(new Error('OffLimitSlot.weekday must be between 1 and 7'));
+    }
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+});
+
 const BookingSlotSchema = new Schema(
   {
     slotId: { type: Schema.Types.ObjectId, ref: 'Slot', required: false },
@@ -72,6 +91,22 @@ const BookingSlotSchema = new Schema(
   },
   { _id: true }
 );
+
+// Validate booking slot ranges at subdocument level
+BookingSlotSchema.pre('validate', function (next) {
+  try {
+    if (typeof this.fromEpoch !== 'number' || typeof this.toEpoch !== 'number') {
+      return next(new Error('BookingSlot.fromEpoch and toEpoch must be numbers (epoch ms)'));
+    }
+    if (this.fromEpoch >= this.toEpoch) {
+      return next(new Error('BookingSlot.fromEpoch must be less than toEpoch'));
+    }
+    // capacityUsed validated by schema min
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+});
 
 /* -------------------------
  * Calendar schema
@@ -99,6 +134,15 @@ const CalendarSchema = new Schema(
     // optimistic lock for owner/admin updates (epoch ms when lock acquired)
     updateLockEpoch: { type: Number, default: null },
 
+    // overflow chain head for additional weekly documents when bookings grow
+    overflowCalendar: { type: Schema.Types.ObjectId, ref: 'Calendar', default: null, index: true },
+
+    // mark overflow documents (head isOverflow: false; overflow docs set true)
+    isOverflow: { type: Boolean, default: false, index: true },
+
+    // last measured BSON size of this document (bytes) — authoritative guard for routing writes
+    docSizeBytes: { type: Number, default: 0, min: 0, index: true },
+
     metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
 
     createdAtEpoch: { type: Number, default: () => Date.now() },
@@ -119,9 +163,11 @@ CalendarSchema.index({ ownerId: 1, 'datesBracket.startEpoch': 1 }, { unique: tru
 CalendarSchema.index({ serviceId: 1, 'datesBracket.startEpoch': 1 });
 // for queries by booking ranges (if embedded)
 CalendarSchema.index({ ownerId: 1, 'bookingsSlots.fromEpoch': 1, 'bookingsSlots.toEpoch': 1 });
+// index bookingId inside embedded bookings for efficient release/lookup by bookingId
+CalendarSchema.index({ 'bookingsSlots.bookingId': 1 });
 
 /* -------------------------
- * Pre-save normalization
+ * Pre-save normalization and docSize tracking
  * ------------------------- */
 
 CalendarSchema.pre('save', function (next) {
@@ -139,6 +185,37 @@ CalendarSchema.pre('save', function (next) {
     const now = Date.now();
     this.updatedAtEpoch = now;
     if (!this.createdAtEpoch) this.createdAtEpoch = now;
+
+    // Validate embedded slots are within the week bracket where possible (best-effort)
+    if (Array.isArray(this.offLimitsSlots)) {
+      for (const o of this.offLimitsSlots) {
+        if (typeof o.fromEpoch === 'number' && typeof o.toEpoch === 'number') {
+          // allow off-limits that overlap week; do not strictly reject but warn via thrown error if completely out of range
+          if (o.toEpoch < this.datesBracket.startEpoch || o.fromEpoch > this.datesBracket.endEpoch) {
+            return next(new Error('OffLimitSlot must overlap the calendar week'));
+          }
+        }
+      }
+    }
+
+    if (Array.isArray(this.bookingsSlots)) {
+      for (const b of this.bookingsSlots) {
+        if (typeof b.fromEpoch === 'number' && typeof b.toEpoch === 'number') {
+          if (b.toEpoch < this.datesBracket.startEpoch || b.fromEpoch > this.datesBracket.endEpoch) {
+            return next(new Error('BookingSlot must overlap the calendar week'));
+          }
+        }
+      }
+    }
+
+    // update docSizeBytes using BSON exact size of the plain object about to be persisted
+    try {
+      const plain = this.toObject({ depopulate: true, versionKey: false, transform: false });
+      this.docSizeBytes = BSON.calculateObjectSize(plain);
+    } catch (err) {
+      // non-fatal: leave docSizeBytes as-is if calculation fails
+    }
+
     next();
   } catch (err) {
     next(err);
@@ -224,6 +301,8 @@ CalendarSchema.statics.findOrCreateWeeklyCalendar = async function (ownerId, ser
     datesBracket: { startEpoch: monday, endEpoch: end },
     offLimitsSlots: [], // will attempt copy-forward below
     bookingsSlots: [],
+    isOverflow: false,
+    docSizeBytes: 0,
     createdAtEpoch: Date.now(),
     updatedAtEpoch: Date.now()
   };
@@ -256,6 +335,8 @@ CalendarSchema.statics.findOrCreateWeeklyCalendar = async function (ownerId, ser
  * getLatestByService(serviceId)
  * - returns the latest calendar document for the service (by datesBracket.startEpoch desc)
  * - if none found, returns null
+ *
+ * Note: callers should use repo-level helpers to obtain the merged logical calendar (head + overflow).
  */
 CalendarSchema.statics.getLatestByService = async function (serviceId) {
   if (!serviceId) return null;
@@ -266,6 +347,8 @@ CalendarSchema.statics.getLatestByService = async function (serviceId) {
  * getLatestByUser(ownerId)
  * - returns the latest calendar for the user that has NO serviceId (user-level calendar)
  * - if none found, returns null
+ *
+ * Note: callers should use repo-level helpers to obtain the merged logical calendar (head + overflow).
  */
 CalendarSchema.statics.getLatestByUser = async function (ownerId) {
   if (!ownerId) return null;
@@ -342,6 +425,31 @@ CalendarSchema.statics.releaseCalendarLock = async function (ownerId, startEpoch
   const update = { $set: { updateLockEpoch: null } };
   const res = await Calendar.findOneAndUpdate(query, update, { new: true });
   return !!res;
+};
+
+/* -------------------------
+ * Utility helpers
+ * ------------------------- */
+
+/**
+ * toObjectId
+ * - Normalize an id to mongoose ObjectId when valid, otherwise return original value.
+ */
+CalendarSchema.statics.toObjectId = function (id) {
+  if (!id) return id;
+  return mongoose.Types.ObjectId.isValid(id) ? mongoose.Types.ObjectId(id) : id;
+};
+
+/**
+ * calculateBSONSize
+ * - Helper to compute exact BSON size for an arbitrary object (useful in repo write-path).
+ */
+CalendarSchema.statics.calculateBSONSize = function (obj) {
+  try {
+    return BSON.calculateObjectSize(obj);
+  } catch (err) {
+    return null;
+  }
 };
 
 /* -------------------------
