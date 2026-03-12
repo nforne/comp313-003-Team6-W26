@@ -214,8 +214,8 @@ service.getWeeksCalendar = async function ({ entity, startOfWeekEpoch, endOfWeek
     else persisted = await repo.getLatestByUser(ownerId, cursor);
 
     if (persisted) {
-      persisted.meta = persisted.meta || {};
-      persisted.meta.source = 'persisted';
+      persisted.metadata = persisted.metadata || {};
+      persisted.metadata.source = 'persisted';
       weeks.push(persisted);
       continue;
     }
@@ -234,7 +234,7 @@ service.getWeeksCalendar = async function ({ entity, startOfWeekEpoch, endOfWeek
       datesBracket: { startEpoch: cursor, endEpoch: sundayEndEpoch(cursor) },
       offLimitsSlots: offLimits,
       bookingsSlots: [],
-      meta: { source: 'constructed' }
+      metadata: { source: 'constructed' }
     };
 
     weeks.push(constructed);
