@@ -1,6 +1,7 @@
 // src/repositories/request.repo.js
 /**
  * Repository for Request model
+ *
  * - CRUD wrappers
  * - Session-aware update helpers for transactional flows
  * - Search helpers that respect expiresAt and status
@@ -46,7 +47,16 @@ async function findById(id, opts = {}) {
  */
 async function updateById(id, patch) {
   if (!patch || Object.keys(patch).length === 0) return findById(id);
+  // keep updatedAt
   patch.updatedAt = Date.now();
+
+  // Keep expiresAtDate in sync when expiresAt is provided in the patch
+  if (Object.prototype.hasOwnProperty.call(patch, 'expiresAt')) {
+    const val = patch.expiresAt === null ? null : Number(patch.expiresAt);
+    patch.expiresAt = val;
+    patch.expiresAtDate = val ? new Date(val) : null;
+  }
+
   return Request.findByIdAndUpdate(id, { $set: patch }, { new: true }).populate('bids').exec();
 }
 
@@ -61,6 +71,14 @@ async function updateById(id, patch) {
 async function updateByIdWithSession(id, patch, session) {
   if (!patch || Object.keys(patch).length === 0) return findById(id);
   patch.updatedAt = Date.now();
+
+  // Keep expiresAtDate in sync when expiresAt is provided in the patch
+  if (Object.prototype.hasOwnProperty.call(patch, 'expiresAt')) {
+    const val = patch.expiresAt === null ? null : Number(patch.expiresAt);
+    patch.expiresAt = val;
+    patch.expiresAtDate = val ? new Date(val) : null;
+  }
+
   return Request.findByIdAndUpdate(id, { $set: patch }, { new: true, session }).populate('bids').exec();
 }
 
@@ -117,10 +135,12 @@ async function searchOpenRequests({
     query = Request.find(filter).sort({ createdAt: -1 });
   }
 
-  const skip = (page - 1) * pageSize;
-  const results = await query.skip(skip).limit(pageSize).populate('bids').lean().exec();
+  const skip = Math.max(0, (Number(page) - 1)) * Number(pageSize);
+  const results = await query.skip(skip).limit(Number(pageSize)).populate('bids').lean().exec();
+
+  // total should reflect the same filter (near queries may be expensive; this keeps semantics consistent)
   const total = await Request.countDocuments(filter).exec();
-  return { results, total, page, pageSize };
+  return { results, total, page: Number(page), pageSize: Number(pageSize) };
 }
 
 /**

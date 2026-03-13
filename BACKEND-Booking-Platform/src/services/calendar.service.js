@@ -182,7 +182,7 @@ service.isSlotAvailable = async function ({ ownerId, serviceId = null, fromEpoch
 /* -------------------------
  * Weeks calendar builder
  * ------------------------- */
-
+//Query: { entity: 'user:<id>'|'service:<id>', startOfWeekEpoch, endOfWeekEpoch?, timezone? }
 service.getWeeksCalendar = async function ({ entity, startOfWeekEpoch, endOfWeekEpoch = null, timezone = 'UTC', requesterIsAdmin = false, requesterId = null }) {
   if (!entity || typeof entity !== 'string') return { ok: false, code: 'INVALID_INPUT', message: 'entity required' };
 
@@ -303,7 +303,7 @@ service.reserveTentativeSlots = async function ({ type, id, slots = [], metadata
         bookingId: token,
         fromEpoch,
         toEpoch,
-        capacityUsed: s.capacityUsed || 1,
+        capacityUsed: s.capacityNeeded || s.capacityUsed || 1,
         session,
         tentative: true,
         metadata

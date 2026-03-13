@@ -172,8 +172,14 @@ repo.isSlotAvailable = async function ({ ownerId, serviceId = null, fromEpoch, t
   else query.serviceId = { $in: [null, undefined] };
 
   const head = await Calendar.findOne(query).exec();
+
   if (!head) {
-    return { ok: false, code: 'NO_CALENDAR', message: 'no materialized calendar for week; treat as default or materialize' };
+    try {
+      head = await repo.findOrCreateWeeklyCalendar(ownerId, serviceId, fromEpoch, opts = {capacity: 1})
+    } catch (e) {
+        /* ignore */
+        return { ok: false, code: 'NO_CALENDAR', message: 'no materialized calendar for week; treat as default or materialize' };
+    }
   }
 
   const merged = await loadMergedCalendar(head._id);

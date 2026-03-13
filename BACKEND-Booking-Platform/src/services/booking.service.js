@@ -145,7 +145,7 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
     err.status = 404;
     throw err;
   }
-  if (request.status !== 'active') {
+  if (!['active', 'pending_action'].includes(request.status)) {
     const err = new Error('Request not open for booking');
     err.status = 409;
     throw err;
@@ -163,7 +163,7 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
       const ownerId = target.type === 'provider' ? target.id : null;
       const serviceId = target.type === 'service' ? target.id : null;
       for (const s of payload.slots) {
-        const avail = await calendarService.checkRangeAvailability({ ownerId, serviceId, fromEpoch: s.from, toEpoch: s.to, capacityNeeded: payload.capacityNeeded || 1 });
+        const avail = await calendarService.checkRangeAvailability({ ownerId, serviceId, fromEpoch: s.from, toEpoch: s.to, capacityNeeded: s.capacityNeeded || payload.capacityNeeded || 1 });
         if (!avail || !avail.ok) {
           const err = new Error('Requested slots are not available on the calendar');
           err.status = 409;
@@ -209,7 +209,7 @@ async function createBookingTransactional(actor, payload, correlationId = null) 
       provider_id: payload.providerId,
       bid_id: payload.bidId || null,
       quote_amount: payload.quoteAmount,
-      currency: payload.currency || 'USD',
+      currency: payload.currency || 'CAD',
       services: payload.services || [],
       slots: payload.slots || [],
       description: payload.notes || payload.description || '',

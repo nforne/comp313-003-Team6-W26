@@ -23,7 +23,7 @@ const MessageSchema = new Schema({
   // message type
   type: {
     type: String,
-    enum: ['issue_wall', 'email', 'notification', 'booking', 'review'],
+    enum: ['issue_wall', 'email', 'notification', 'booking', 'review', 'bid', 'system', 'in_app'],
     required: true,
     index: true
   },

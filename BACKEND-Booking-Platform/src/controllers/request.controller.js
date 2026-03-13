@@ -1,4 +1,13 @@
 // src/controllers/request.controller.js
+/**
+ * Request controller (polished, non-disruptive)
+ *
+ * - Thin HTTP layer that validates input, calls request.service, and emits audit events.
+ * - Keeps original routes and semantics intact.
+ * - Small polishing: consistent actor extraction, clearer validation/audit flows,
+ *   safer numeric parsing for query params, and consistent response shapes.
+ */
+
 const requestService = require('../services/request.service');
 const auditService = require('../services/audit.service');
 const { createRequestSchema, searchSchema } = require('../validators/request.validator');
@@ -8,11 +17,13 @@ const { createRequestSchema, searchSchema } = require('../validators/request.val
  */
 async function createRequest(req, res) {
   const correlationId = req.correlationId || null;
+  const actor = req.user || {};
+
   const { error, value } = createRequestSchema.validate(req.body);
   if (error) {
     await auditService.logEvent({
       eventType: 'request.create.failed.validation',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: { userId: actor.userId || null, role: actor.role || null },
       target: { type: 'Request', id: null },
       outcome: 'failure',
       severity: 'warning',
@@ -23,7 +34,6 @@ async function createRequest(req, res) {
   }
 
   try {
-    const actor = req.user || {};
     const created = await requestService.createRequest(value, actor, correlationId);
 
     await auditService.logEvent({
@@ -40,7 +50,7 @@ async function createRequest(req, res) {
   } catch (err) {
     await auditService.logEvent({
       eventType: 'request.create.failed',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: { userId: actor.userId || null, role: actor.role || null },
       target: { type: 'Request', id: null },
       outcome: 'failure',
       severity: err.status && err.status >= 500 ? 'error' : 'warning',
@@ -56,8 +66,9 @@ async function createRequest(req, res) {
  */
 async function getRequest(req, res) {
   const correlationId = req.correlationId || null;
+  const actor = req.user || null;
+
   try {
-    const actor = req.user || null;
     const r = await requestService.getRequest(req.params.id, actor, correlationId);
 
     await auditService.logEvent({
@@ -91,11 +102,13 @@ async function getRequest(req, res) {
  */
 async function searchRequests(req, res) {
   const correlationId = req.correlationId || null;
+  const actor = req.user || null;
+
   const { error, value } = searchSchema.validate(req.query);
   if (error) {
     await auditService.logEvent({
       eventType: 'request.search.failed.validation',
-      actor: { userId: req.user && req.user.userId || null, role: req.user && req.user.role || null },
+      actor: { userId: actor && actor.userId || null, role: actor && actor.role || null },
       target: { type: 'Request', id: null },
       outcome: 'failure',
       severity: 'warning',
@@ -106,14 +119,21 @@ async function searchRequests(req, res) {
   }
 
   try {
-    const actor = req.user || null;
-    const near = (typeof req.query.nearLng !== 'undefined' && typeof req.query.nearLat !== 'undefined')
-      ? [Number(req.query.nearLng), Number(req.query.nearLat)]
+    // parse near coordinates if provided (prefer validated values from schema)
+    const near = (typeof value.nearLng !== 'undefined' && typeof value.nearLat !== 'undefined')
+      ? [Number(value.nearLng), Number(value.nearLat)]
       : null;
 
+    // ensure numeric pagination values are safe
+    const page = Number.isFinite(Number(value.page)) ? Math.max(1, Number(value.page)) : 1;
+    const pageSize = Number.isFinite(Number(value.pageSize)) ? Math.max(1, Math.min(100, Number(value.pageSize))) : 20;
+    const radiusMeters = Number.isFinite(Number(value.radiusMeters)) ? Number(value.radiusMeters) : 50000;
+
     const params = Object.assign({}, value, {
-      near: near,
-      radiusMeters: value.radiusMeters
+      near,
+      page,
+      pageSize,
+      radiusMeters
     });
 
     const results = await requestService.searchOpenRequests(params, actor, correlationId);
@@ -148,8 +168,9 @@ async function searchRequests(req, res) {
  */
 async function updateRequest(req, res) {
   const correlationId = req.correlationId || null;
+  const actor = req.user || {};
+
   try {
-    const actor = req.user || {};
     const updated = await requestService.updateRequest(req.params.id, req.body, actor, correlationId);
 
     await auditService.logEvent({
@@ -184,8 +205,9 @@ async function updateRequest(req, res) {
  */
 async function deleteRequest(req, res) {
   const correlationId = req.correlationId || null;
+  const actor = req.user || {};
+
   try {
-    const actor = req.user || {};
     const deleted = await requestService.hardDeleteRequest(req.params.id, actor, correlationId);
 
     await auditService.logEvent({
@@ -213,4 +235,4 @@ async function deleteRequest(req, res) {
   }
 }
 
-module.exports = { createRequest, getRequest, searchRequests, updateRequest, deleteRequest };
+module.exports = {  createRequest,  getRequest,  searchRequests,  updateRequest,  deleteRequest};

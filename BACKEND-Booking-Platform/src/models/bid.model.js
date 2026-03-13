@@ -8,13 +8,14 @@
  */
 
 const mongoose = require('mongoose');
+const { Schema } = mongoose;
 
-const BidSchema = new mongoose.Schema({
+const BidSchema = new Schema({
   request_id: { type: String, required: true, index: true },
   provider_id: { type: String, required: true, index: true }, // 16-digit userId per spec
   quote_amount: { type: Number, required: true },
-  currency: { type: String, required: true, length: 3 }, // ISO 4217
-  services: { type: [String], default: [] },// optional list of service ids
+  currency: { type: String, required: true, maxlength: 3 }, // ISO 4217
+  services: { type: [String], default: [] }, // optional list of service ids
   message: { type: Schema.Types.ObjectId, ref: 'Message', required: false, index: true },
   status: {
     type: String,
@@ -22,7 +23,7 @@ const BidSchema = new mongoose.Schema({
     default: 'submitted',
     index: true
   },
-  metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+  metadata: { type: Schema.Types.Mixed, default: {} },
   createdAt: { type: Number, default: () => Date.now(), index: true },
   updatedAt: { type: Number, default: () => Date.now() },
   archived: { type: Boolean, default: false } // soft-delete flag for non-draft deletions
@@ -31,6 +32,7 @@ const BidSchema = new mongoose.Schema({
   versionKey: false
 });
 
+// keep timestamps as epoch ms
 BidSchema.pre('save', function (next) {
   const now = Date.now();
   this.updatedAt = now;

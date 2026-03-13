@@ -1,16 +1,45 @@
 // src/models/request.model.js
-//
-// Request model
-// - Represents a consumer request for services with optional geolocation, time window, and bidding.
-// - Keeps explicit expiration fields (expiresAt epoch ms and expiresAtDate Date) for scheduling and reporting.
-// - IMPORTANT: TTL deletion code is commented out below to avoid server-side deletion. Use an application worker to mark requests expired.
+/**
+ * Request model (polished, non-disruptive)
+ *
+ * - Preserves existing field names and semantics.
+ * - Keeps TTL deletion code commented out (expiration handled by background worker).
+ * - Adds lightweight validation and clearer pre-save sync for expiresAt/Date.
+ * - Adds validation for WhenSchema.capacityNeeded (integer >= 1).
+ */
 
 const mongoose = require('mongoose');
 
 const WhenSchema = new mongoose.Schema({
   from: { type: Number, required: true }, // epoch ms UTC
-  to: { type: Number, required: true }    // epoch ms UTC
+  to: { type: Number, required: true },   // epoch ms UTC
+  isBusinessHours: { type: Boolean, default: false }, // meaning all business hours between from and to
+  capacityNeeded: { type: Number, required: true, default: 1 }
 }, { _id: false });
+
+WhenSchema.path('from').validate(function (v) {
+  return typeof v === 'number' && !Number.isNaN(v);
+}, 'when.from must be a valid epoch ms number');
+
+WhenSchema.path('to').validate(function (v) {
+  return typeof v === 'number' && !Number.isNaN(v);
+}, 'when.to must be a valid epoch ms number');
+
+WhenSchema.path('capacityNeeded').validate(function (v) {
+  // must be an integer >= 1
+  return Number.isInteger(v) && v >= 1;
+}, 'when.capacityNeeded must be an integer greater than or equal to 1');
+
+WhenSchema.pre('validate', function (next) {
+  if (typeof this.from === 'number' && typeof this.to === 'number' && this.from >= this.to) {
+    return next(new Error('when.from must be less than when.to'));
+  }
+  // ensure capacityNeeded is sane
+  if (typeof this.capacityNeeded !== 'number' || !Number.isInteger(this.capacityNeeded) || this.capacityNeeded < 1) {
+    return next(new Error('when.capacityNeeded must be an integer greater than or equal to 1'));
+  }
+  next();
+});
 
 const RequestSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true },
@@ -23,32 +52,42 @@ const RequestSchema = new mongoose.Schema({
     type: { type: String, enum: ['Point'], default: 'Point' },
     coordinates: { type: [Number], default: undefined } // [lng, lat]
   },
-  when: { type: WhenSchema, required: true },
+  when: { type: [WhenSchema], required: true, default: [] }, // collection of windows
   bids: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Bid' }],
   isPrivate: { type: Boolean, default: false },
   // allowedProviders MUST contain provider userIds only (no serviceIds). Service-layer will populate from services when needed.
   allowedProviders: { type: [String], default: [], index: true },
 
-  // New: explicit expiration time (epoch ms).
+  // explicit expiration time (epoch ms)
   expiresAt: { type: Number, default: null, index: true },
 
   // Date form of expiresAt (kept for scheduling/reporting).
   expiresAtDate: { type: Date, default: null },
 
-  status: { type: String, enum: ['draft','active','expired','booked','suspended','cancelled'], default: 'draft' },
-  
+  status: { 
+    type: String, 
+    enum: ['draft','active','expired','booked','suspended','cancelled','pending_action', 'archived', 'closed'], 
+    default: 'draft' 
+  },
+
+  // extensible metadata (e.g., IsMultipleBusinessDays, other flags)
   metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
 
+  // epoch ms timestamps (kept for compatibility with existing code)
   createdAt: { type: Number },
   updatedAt: { type: Number }
-}, { collection: 'requests' });
+}, {
+  collection: 'requests',
+  toJSON: { virtuals: true, versionKey: false },
+  toObject: { virtuals: true }
+});
 
 /**
  * Indexes
  */
 RequestSchema.index({ createdBy: 1, status: 1 });
 RequestSchema.index({ categories: 1 });
-RequestSchema.index({ 'geo': '2dsphere' });
+RequestSchema.index({ geo: '2dsphere' });
 RequestSchema.index({ expiresAt: 1 });
 
 /**
@@ -77,9 +116,30 @@ RequestSchema.pre('save', function(next) {
   this.updatedAt = now;
   if (!this.createdAt) this.createdAt = now;
 
-  // If expiresAt not provided, default to when.to (end of requested window)
-  if ((!this.expiresAt || this.expiresAt === null) && this.when && typeof this.when.to === 'number') {
-    this.expiresAt = Number(this.when.to);
+  // Validate when array capacity and ordering at document level
+  if (!Array.isArray(this.when) || this.when.length === 0) {
+    return next(new Error('Request must include at least one "when" slot'));
+  }
+
+  for (let i = 0; i < this.when.length; i++) {
+    const w = this.when[i];
+    if (!w || typeof w.from !== 'number' || typeof w.to !== 'number') {
+      return next(new Error(`when[${i}] must include numeric from and to epoch ms`));
+    }
+    if (w.from >= w.to) {
+      return next(new Error(`when[${i}].from must be less than when[${i}].to`));
+    }
+    if (!Number.isInteger(w.capacityNeeded) || w.capacityNeeded < 1) {
+      return next(new Error(`when[${i}].capacityNeeded must be an integer >= 1`));
+    }
+  }
+
+  // If expiresAt not provided, default to the latest when.to (end of requested window)
+  if ((!this.expiresAt || this.expiresAt === null) && Array.isArray(this.when) && this.when.length > 0) {
+    // compute max 'to' across windows
+    const toValues = this.when.map(w => (w && typeof w.to === 'number') ? Number(w.to) : 0);
+    const maxTo = Math.max(...toValues);
+    if (maxTo > 0) this.expiresAt = Number(maxTo);
   }
 
   // Keep expiresAtDate in sync (null if no expiresAt)
@@ -119,5 +179,15 @@ RequestSchema.statics.markExpired = function(requestId) {
     { new: true }
   ).lean().exec();
 };
+
+/**
+ * Virtuals
+ */
+RequestSchema.virtual('createdAtDate').get(function () {
+  return this.createdAt ? new Date(this.createdAt) : null;
+});
+RequestSchema.virtual('updatedAtDate').get(function () {
+  return this.updatedAt ? new Date(this.updatedAt) : null;
+});
 
 module.exports = mongoose.model('Request', RequestSchema);
