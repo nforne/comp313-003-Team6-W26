@@ -3,6 +3,7 @@
 // Persistence helpers for the User model (Mongoose).
 // - Thin repository layer: CRUD, auth helpers, refresh token management.
 // - Broadcast helpers: paginated userId listing and cursor stream for memory-safe iteration.
+// - Public search wrapper: delegates to model-level publicSearch static and normalizes results.
 // - All functions return Promises and throw on errors; callers should handle errors and logging.
 //
 // Usage examples:
@@ -68,6 +69,22 @@ async function findPublicById(userId) {
 }
 
 /**
+ * findPublicProfileById
+ * - Convenience wrapper that returns a safe public JSON representation (toPublicJSON)
+ *   or null if not found. Use this when you need the public projection.
+ *
+ * @param {string} userId
+ * @returns {Promise<Object|null>}
+ */
+async function findPublicProfileById(userId) {
+  if (!userId) return null;
+  const doc = await User.findOne({ userId }).exec();
+  if (!doc) return null;
+  if (typeof doc.toPublicJSON === 'function') return doc.toPublicJSON();
+  return doc;
+}
+
+/**
  * updateByUserId
  * - Partial update by userId. Automatically updates updatedAt timestamp.
  * - Returns the updated document.
@@ -127,6 +144,38 @@ async function removeRefreshToken(userId, tokenHash) {
 }
 
 /* -------------------------
+ * Public search wrapper
+ * ------------------------- */
+
+/**
+ * publicSearch
+ * - Wrapper around User.publicSearch static.
+ * - Ensures safe defaults and returns results in a consistent shape:
+ *     { total: number, results: Array<Object> }
+ * - Each result is a plain object (lean) containing only public fields (model controls projection).
+ *
+ * @param {string|null} q - free-text query (optional)
+ * @param {Object} opts - { limit, skip, sort, filters }
+ * @returns {Promise<{ total: number, results: Array<Object> }>}
+ */
+async function publicSearch(q = null, opts = {}) {
+  // Validate/normalize opts
+  const options = Object.assign({}, opts || {});
+  if (typeof options.limit === 'undefined') options.limit = 20;
+  if (typeof options.skip === 'undefined') options.skip = 0;
+  // Delegate to model static which implements text search, filters, pagination
+  if (typeof User.publicSearch !== 'function') {
+    throw new Error('Public search is not available on User model');
+  }
+  const res = await User.publicSearch(q, options);
+  // Ensure shape and types
+  return {
+    total: Number(res && res.total ? res.total : 0),
+    results: Array.isArray(res && res.results ? res.results : []) ? res.results : []
+  };
+}
+
+/* -------------------------
  * Broadcast / listing helpers
  * ------------------------- */
 
@@ -178,11 +227,15 @@ module.exports = {
   findByUserId,
   findByEmail,
   findPublicById,
+  findPublicProfileById,
   updateByUserId,
 
   // refresh tokens
   addRefreshToken,
   removeRefreshToken,
+
+  // public search
+  publicSearch,
 
   // broadcast helpers
   listUserIds,

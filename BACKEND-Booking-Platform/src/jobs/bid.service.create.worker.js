@@ -64,13 +64,14 @@ async function createBidWorker(actor, requestId, payload = {}, deps = {}, correl
     throw err;
   }
 
-  // Authorization
-  if (!actor || (actor.role !== 'service_provider' && actor.role !== 'administrator')) {
-    const err = new Error('Only service_provider or administrator may create bids');
-    err.status = 403;
+   // Load request
+  const request = await requestRepo.findById(requestId);
+  if (!request) {
+    const err = new Error('Request not found');
+    err.status = 404;
     if (auditService && typeof auditService.logEvent === 'function') {
       await auditService.logEvent({
-        eventType: 'bid.create.forbidden',
+        eventType: 'bid.create.failed.request_not_found',
         actor: actorCtx,
         target: { type: 'Request', id: requestId },
         outcome: 'failure',
@@ -81,14 +82,13 @@ async function createBidWorker(actor, requestId, payload = {}, deps = {}, correl
     throw err;
   }
 
-  // Load request
-  const request = await requestRepo.findById(requestId);
-  if (!request) {
-    const err = new Error('Request not found');
-    err.status = 404;
+  // Authorization
+  if (!actor || (actor.role !== 'service_provider' && actor.role !== 'administrator') || actorCtx.userId == request.createdBy) {
+    const err = new Error('Only service_provider or administrator may create bids and you cannot bid on your own request');
+    err.status = 403;
     if (auditService && typeof auditService.logEvent === 'function') {
       await auditService.logEvent({
-        eventType: 'bid.create.failed.request_not_found',
+        eventType: 'bid.create.forbidden',
         actor: actorCtx,
         target: { type: 'Request', id: requestId },
         outcome: 'failure',
@@ -575,7 +575,6 @@ async function defaultDeliverMessageIfPossible(messageDoc, actorCtx, deps = {}, 
     });
   }
 }
-
 
 /* -------------------------
  * Exports

@@ -2,7 +2,7 @@
 //
 // User service: business logic for user lifecycle and authentication.
 // - Responsibilities: register, authenticate (login), logout, public profile retrieval,
-//   profile updates, and role changes with RBAC checks.
+//   profile updates, role changes with RBAC checks, and public directory search.
 // - Integrates with user repository, JWT helpers, audit service and refresh-token storage.
 // - All public functions accept an optional correlationId for tracing/audit.
 //
@@ -302,6 +302,58 @@ async function getPublicProfile(userId, correlationId = null) {
 }
 
 /**
+ * Public directory search for providers.
+ * Signature: publicSearch(q = null, opts = {}, correlationId = null)
+ *
+ * - Delegates to repository publicSearch which wraps model-level text search and filters.
+ * - Returns { total, results } where results are plain objects (lean).
+ *
+ * @param {string|null} q
+ * @param {Object} opts
+ * @param {string|null} correlationId
+ * @returns {Promise<{total:number, results:Array<Object>}>}
+ */
+async function publicSearch(q = null, opts = {}, correlationId = null) {
+  const actor = { userId: null, role: null };
+  try {
+    await auditService.logEvent({
+      eventType: 'user.public_search.attempt',
+      actor,
+      target: { type: 'User', id: null },
+      outcome: 'info',
+      severity: 'info',
+      correlationId,
+      details: { q: q ? String(q).slice(0, 200) : null, opts }
+    });
+
+    const res = await userRepo.publicSearch(q, opts);
+
+    await auditService.logEvent({
+      eventType: 'user.public_search.success',
+      actor,
+      target: { type: 'User', id: null },
+      outcome: 'success',
+      severity: 'info',
+      correlationId,
+      details: { total: res.total }
+    });
+
+    return res;
+  } catch (err) {
+    await auditService.logEvent({
+      eventType: 'user.public_search.failed',
+      actor,
+      target: { type: 'User', id: null },
+      outcome: 'failure',
+      severity: 'error',
+      correlationId,
+      details: { error: err.message }
+    });
+    throw err;
+  }
+}
+
+/**
  * Update profile (self or admin).
  * Signature: updateProfile(userId, patch, correlationId = null)
  *
@@ -489,6 +541,7 @@ module.exports = {
   authenticate,
   logout,
   getPublicProfile,
+  publicSearch,
   updateProfile,
   changeRole
 };

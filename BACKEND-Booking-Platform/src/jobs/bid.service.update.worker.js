@@ -26,142 +26,6 @@ function actorContext(actor) {
   return { userId: actor && actor.userId ? actor.userId : null, role: actor && actor.role ? actor.role : null };
 }
 
-/* Local defensive message helpers (fallbacks) kept minimal; prefer utils implementations */
-async function defaultPersistAndSubmitMessage(payload, actorCtx, deps = {}, correlationId = null) {
-  const { messageRepo, MessageModel, auditService } = deps || {};
-  let messageDoc = null;
-
-  if (messageRepo && typeof messageRepo.createMessage === 'function') {
-    try {
-      messageDoc = await messageRepo.createMessage(payload);
-      if (messageDoc && messageDoc._id && MessageModel && typeof MessageModel.findById === 'function') {
-        try { messageDoc = await MessageModel.findById(messageDoc._id).exec(); } catch (_) { /* ignore */ }
-      }
-      if (messageDoc && typeof messageDoc.markSubmitted === 'function') {
-        try { await messageDoc.markSubmitted({ sentAt: new Date() }); } catch (_) { /* ignore */ }
-      } else if (messageDoc && messageDoc._id && typeof messageRepo.updateMessage === 'function') {
-        try { await messageRepo.updateMessage(messageDoc._id, { status: 'submitted', visible: true, 'metadata.sentAt': Date.now() }); } catch (_) { /* ignore */ }
-      }
-    } catch (err) {
-      if (auditService && typeof auditService.logEvent === 'function') {
-        await auditService.logEvent({
-          eventType: 'bid.message.create_failed',
-          actor: actorCtx,
-          target: { type: 'Request', id: payload && payload.metadata && payload.metadata.requestId ? payload.metadata.requestId : null },
-          outcome: 'failure',
-          severity: 'warning',
-          correlationId,
-          details: { error: err && err.message }
-        });
-      }
-      messageDoc = null;
-    }
-  }
-
-  if (!messageDoc && MessageModel && typeof MessageModel.buildDraft === 'function') {
-    try {
-      const draft = MessageModel.buildDraft(Object.assign({}, payload, { status: 'draft' }));
-      messageDoc = await draft.save();
-      if (messageDoc && typeof messageDoc.markSubmitted === 'function') {
-        try { await messageDoc.markSubmitted({ sentAt: new Date() }); } catch (_) { /* ignore */ }
-      } else if (messageRepo && typeof messageRepo.updateMessage === 'function') {
-        try { await messageRepo.updateMessage(messageDoc._id, { status: 'submitted', visible: true, 'metadata.sentAt': Date.now() }); } catch (_) { /* ignore */ }
-      }
-    } catch (err) {
-      if (auditService && typeof auditService.logEvent === 'function') {
-        await auditService.logEvent({
-          eventType: 'bid.message.model_failed',
-          actor: actorCtx,
-          target: { type: 'Request', id: payload && payload.metadata && payload.metadata.requestId ? payload.metadata.requestId : null },
-          outcome: 'failure',
-          severity: 'warning',
-          correlationId,
-          details: { error: err && err.message }
-        });
-      }
-      messageDoc = null;
-    }
-  }
-
-  return messageDoc;
-}
-
-async function defaultDeliverMessageIfPossible(messageDoc, actorCtx, deps = {}, correlationId = null) {
-  const { MessageModel, commsJs, auditService } = deps || {};
-  if (!messageDoc || !messageDoc._id) {
-    if (auditService && typeof auditService.logEvent === 'function') {
-      await auditService.logEvent({
-        eventType: 'bid.message.deliver_skipped',
-        actor: actorCtx,
-        target: { type: 'Message', id: null },
-        outcome: 'info',
-        severity: 'info',
-        correlationId,
-        details: { reason: 'no_message' }
-      });
-    }
-    return;
-  }
-
-  let doc = messageDoc;
-  if (!doc.status && MessageModel && typeof MessageModel.findById === 'function') {
-    try { doc = await MessageModel.findById(messageDoc._id).exec(); } catch (_) { doc = messageDoc; }
-  }
-
-  if (!doc || doc.status !== 'submitted') {
-    if (auditService && typeof auditService.logEvent === 'function') {
-      await auditService.logEvent({
-        eventType: 'bid.message.deliver_skipped',
-        actor: actorCtx,
-        target: { type: 'Message', id: messageDoc._id.toString() },
-        outcome: 'info',
-        severity: 'info',
-        correlationId,
-        details: { reason: 'not_submitted', status: doc && doc.status }
-      });
-    }
-    return;
-  }
-
-  if (commsJs && typeof commsJs.deliverMessage === 'function') {
-    try {
-      await commsJs.deliverMessage(messageDoc._id, { actor: actorCtx, logger: console, correlationId, asyncBroadcast: true });
-      if (auditService && typeof auditService.logEvent === 'function') {
-        await auditService.logEvent({
-          eventType: 'bid.message.delivered',
-          actor: actorCtx,
-          target: { type: 'Message', id: messageDoc._id.toString() },
-          outcome: 'success',
-          severity: 'info',
-          correlationId
-        });
-      }
-    } catch (deliverErr) {
-      if (auditService && typeof auditService.logEvent === 'function') {
-        await auditService.logEvent({
-          eventType: 'bid.message.deliver_failed',
-          actor: actorCtx,
-          target: { type: 'Message', id: messageDoc._id ? messageDoc._id.toString() : null },
-          outcome: 'failure',
-          severity: 'warning',
-          correlationId,
-          details: { error: deliverErr && deliverErr.message ? deliverErr.message : String(deliverErr) }
-        });
-      }
-    }
-  } else if (auditService && typeof auditService.logEvent === 'function') {
-    await auditService.logEvent({
-      eventType: 'bid.message.deliver_skipped',
-      actor: actorCtx,
-      target: { type: 'Message', id: messageDoc._id.toString() },
-      outcome: 'info',
-      severity: 'info',
-      correlationId,
-      details: { reason: 'comms-js not available' }
-    });
-  }
-}
-
 /* -------------------------
  * updateBidWorker
  * ------------------------- */
@@ -176,8 +40,8 @@ async function updateBidWorker(actor, bidId, patch = {}, deps = {}, correlationI
   const MessageModel = deps.MessageModel || await safeRequire('../models/message.model') || null;
   const commsJs = deps.commsJs || await safeRequire('../comms-js') || null;
 
-  // Prefer utils module (renamed to utils+ file). Fallback to legacy worker if present.
-  const utils = deps.utils || await safeRequire('../jobs/bid.service.utils+.worker') || await safeRequire('../jobs/bid.service.worker');
+  // Prefer utils module (renamed to utils+ file)
+  const utils = deps.utils || await safeRequire('../jobs/bid.service.utils+.worker')
   const processedBidSlots = utils && typeof utils.processedBidSlots === 'function' ? utils.processedBidSlots : null;
   const persistAndSubmitMessageHelper = utils && typeof utils.persistAndSubmitMessage === 'function' ? utils.persistAndSubmitMessage : null;
   const deliverMessageHelper = utils && typeof utils.deliverMessageIfPossible === 'function' ? utils.deliverMessageIfPossible : null;
@@ -219,6 +83,37 @@ async function updateBidWorker(actor, bidId, patch = {}, deps = {}, correlationI
         outcome: 'failure',
         severity: 'warning',
         correlationId
+      });
+    }
+    throw err;
+  }
+
+  const archiveBidAndRequest = async (needAction=false, reason = 'capacity_conflict') => {
+   try {
+      await bidRepo.updateById(bidId, { archived: true, status: 'archived', updatedAt: Date.now() });
+    } catch (_) { /* ignore */ }
+
+    try {
+      const newMeta = Object.assign({}, request.metadata || {}, { archivedBySystem: true, archivedReason: reason, archivedAt: Date.now() });
+      await requestRepo.updateById(request._id ? request._id.toString() : request._id, { metadata: newMeta, status: needAction ? 'pending_action' : 'archived', updatedAt: Date.now() });
+    } catch (_) { /* ignore */ }
+  }
+
+
+  // provider cannot request and bid on their own request
+  if(patch.status === 'accepted' && bid.provider_id == actorContext.userId){
+    await archiveBidAndRequest(false, 'bid.update.failed._own_request_and_bid_forbidden');
+    const err = new Error('Provider cannot request and bid on their own request');
+    err.status = 409;
+    if (auditService && typeof auditService.logEvent === 'function') {
+      await auditService.logEvent({
+        eventType: 'bid.update.failed._own_request_and_bid_forbidden',
+        actor: actorCtx,
+        target: { type: 'Bid', id: bidId },
+        outcome: 'failure',
+        severity: 'warning',
+        correlationId,
+        details: { requestStatus: request.status, bidStatus: bid.status }
       });
     }
     throw err;
@@ -453,15 +348,7 @@ async function updateBidWorker(actor, bidId, patch = {}, deps = {}, correlationI
       // Capacity conflict or other availability: archive bid and mark request metadata for owner action
       const hasCapacity = conflicts.some(c => c && (c.reason === 'CAPACITY' || c.reason === 'CAPACITY_CHECK_FAILED' || c.type === 'capacity'));
       if (hasCapacity) {
-        try {
-          await bidRepo.updateById(bidId, { archived: true, status: 'archived', updatedAt: Date.now() });
-        } catch (_) { /* ignore */ }
-
-        try {
-          const newMeta = Object.assign({}, request.metadata || {}, { archivedBySystem: true, archivedReason: 'capacity_conflict', archivedAt: Date.now() });
-          await requestRepo.updateById(request._id ? request._id.toString() : request._id, { metadata: newMeta, status: 'pending_action', updatedAt: Date.now() });
-        } catch (_) { /* ignore */ }
-
+        await archiveBidAndRequest(true); // archive bid and call for action on the request
         if (auditService && typeof auditService.logEvent === 'function') {
           await auditService.logEvent({
             eventType: 'bid.accept.failed.capacity_conflict',
@@ -721,6 +608,146 @@ async function updateBidWorker(actor, bidId, patch = {}, deps = {}, correlationI
 
   // Nothing to do
   return bid;
+}
+
+/* -------------------------
+ * Local fallbacks (kept at bottom so utils can override)
+ * ------------------------- */
+
+/* Local defensive message helpers (fallbacks) kept minimal; prefer utils implementations */
+async function defaultPersistAndSubmitMessage(payload, actorCtx, deps = {}, correlationId = null) {
+  const { messageRepo, MessageModel, auditService } = deps || {};
+  let messageDoc = null;
+
+  if (messageRepo && typeof messageRepo.createMessage === 'function') {
+    try {
+      messageDoc = await messageRepo.createMessage(payload);
+      if (messageDoc && messageDoc._id && MessageModel && typeof MessageModel.findById === 'function') {
+        try { messageDoc = await MessageModel.findById(messageDoc._id).exec(); } catch (_) { /* ignore */ }
+      }
+      if (messageDoc && typeof messageDoc.markSubmitted === 'function') {
+        try { await messageDoc.markSubmitted({ sentAt: new Date() }); } catch (_) { /* ignore */ }
+      } else if (messageDoc && messageDoc._id && typeof messageRepo.updateMessage === 'function') {
+        try { await messageRepo.updateMessage(messageDoc._id, { status: 'submitted', visible: true, 'metadata.sentAt': Date.now() }); } catch (_) { /* ignore */ }
+      }
+    } catch (err) {
+      if (auditService && typeof auditService.logEvent === 'function') {
+        await auditService.logEvent({
+          eventType: 'bid.message.create_failed',
+          actor: actorCtx,
+          target: { type: 'Request', id: payload && payload.metadata && payload.metadata.requestId ? payload.metadata.requestId : null },
+          outcome: 'failure',
+          severity: 'warning',
+          correlationId,
+          details: { error: err && err.message }
+        });
+      }
+      messageDoc = null;
+    }
+  }
+
+  if (!messageDoc && MessageModel && typeof MessageModel.buildDraft === 'function') {
+    try {
+      const draft = MessageModel.buildDraft(Object.assign({}, payload, { status: 'draft' }));
+      messageDoc = await draft.save();
+      if (messageDoc && typeof messageDoc.markSubmitted === 'function') {
+        try { await messageDoc.markSubmitted({ sentAt: new Date() }); } catch (_) { /* ignore */ }
+      } else if (messageRepo && typeof messageRepo.updateMessage === 'function') {
+        try { await messageRepo.updateMessage(messageDoc._id, { status: 'submitted', visible: true, 'metadata.sentAt': Date.now() }); } catch (_) { /* ignore */ }
+      }
+    } catch (err) {
+      if (auditService && typeof auditService.logEvent === 'function') {
+        await auditService.logEvent({
+          eventType: 'bid.message.model_failed',
+          actor: actorCtx,
+          target: { type: 'Request', id: payload && payload.metadata && payload.metadata.requestId ? payload.metadata.requestId : null },
+          outcome: 'failure',
+          severity: 'warning',
+          correlationId,
+          details: { error: err && err.message }
+        });
+      }
+      messageDoc = null;
+    }
+  }
+
+  return messageDoc;
+}
+
+async function defaultDeliverMessageIfPossible(messageDoc, actorCtx, deps = {}, correlationId = null) {
+  const { MessageModel, commsJs, auditService } = deps || {};
+  if (!messageDoc || !messageDoc._id) {
+    if (auditService && typeof auditService.logEvent === 'function') {
+      await auditService.logEvent({
+        eventType: 'bid.message.deliver_skipped',
+        actor: actorCtx,
+        target: { type: 'Message', id: null },
+        outcome: 'info',
+        severity: 'info',
+        correlationId,
+        details: { reason: 'no_message' }
+      });
+    }
+    return;
+  }
+
+  let doc = messageDoc;
+  if (!doc.status && MessageModel && typeof MessageModel.findById === 'function') {
+    try { doc = await MessageModel.findById(messageDoc._id).exec(); } catch (_) { doc = messageDoc; }
+  }
+
+  if (!doc || doc.status !== 'submitted') {
+    if (auditService && typeof auditService.logEvent === 'function') {
+      await auditService.logEvent({
+        eventType: 'bid.message.deliver_skipped',
+        actor: actorCtx,
+        target: { type: 'Message', id: messageDoc._id.toString() },
+        outcome: 'info',
+        severity: 'info',
+        correlationId,
+        details: { reason: 'not_submitted', status: doc && doc.status }
+      });
+    }
+    return;
+  }
+
+  if (commsJs && typeof commsJs.deliverMessage === 'function') {
+    try {
+      await commsJs.deliverMessage(messageDoc._id, { actor: actorCtx, logger: console, correlationId, asyncBroadcast: true });
+      if (auditService && typeof auditService.logEvent === 'function') {
+        await auditService.logEvent({
+          eventType: 'bid.message.delivered',
+          actor: actorCtx,
+          target: { type: 'Message', id: messageDoc._id.toString() },
+          outcome: 'success',
+          severity: 'info',
+          correlationId
+        });
+      }
+    } catch (deliverErr) {
+      if (auditService && typeof auditService.logEvent === 'function') {
+        await auditService.logEvent({
+          eventType: 'bid.message.deliver_failed',
+          actor: actorCtx,
+          target: { type: 'Message', id: messageDoc._id ? messageDoc._id.toString() : null },
+          outcome: 'failure',
+          severity: 'warning',
+          correlationId,
+          details: { error: deliverErr && deliverErr.message ? deliverErr.message : String(deliverErr) }
+        });
+      }
+    }
+  } else if (auditService && typeof auditService.logEvent === 'function') {
+    await auditService.logEvent({
+      eventType: 'bid.message.deliver_skipped',
+      actor: actorCtx,
+      target: { type: 'Message', id: messageDoc._id.toString() },
+      outcome: 'info',
+      severity: 'info',
+      correlationId,
+      details: { reason: 'comms-js not available' }
+    });
+  }
 }
 
 /* -------------------------

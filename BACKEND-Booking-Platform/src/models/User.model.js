@@ -78,6 +78,10 @@ const UserSchema = new Schema({
   role: { type: String, enum: ['service_seeker', 'service_provider', 'administrator'], default: 'service_seeker' },
   status: { type: String, enum: ['active', 'inactive', 'suspended', 'available', 'unavailable', 'out_of_service'], default: 'active' },
 
+  // New: whether this provider's profile is eligible to appear in public search results
+  // - Default false to avoid accidental exposure; only providers who opt-in should set true.
+  IsPublicSearchable: { type: Boolean, default: false, index: true },
+
   // Payment and profile content
   paymentMethods: { type: [Schema.Types.Mixed], default: [] },
   selfIntro: { text: { type: String, default: '' }, images: { type: [String], default: [] } },
@@ -104,6 +108,19 @@ const UserSchema = new Schema({
 // Index on nested email value for quick lookup by email address.
 // Sparse unique ensures only documents with an email value are considered for uniqueness.
 UserSchema.index({ 'emails.value': 1 }, { unique: true, sparse: true });
+
+// Compound index to quickly find public providers
+UserSchema.index({ role: 1, IsPublicSearchable: 1, status: 1 });
+
+// Text index to support simple public search across common profile fields.
+// Adjust fields included in text index as needed for search relevance.
+UserSchema.index({
+  firstName: 'text',
+  lastName: 'text',
+  'selfIntro.text': 'text',
+  'descriptionCards.title': 'text',
+  'descriptionCards.descriptions': 'text'
+}, { name: 'UserPublicTextIndex', default_language: 'english' });
 
 /* -------------------------
  * Hooks
@@ -161,6 +178,8 @@ UserSchema.methods.comparePassword = function (plainPassword) {
  * @returns {Object} public user representation
  */
 UserSchema.methods.toPublicJSON = function () {
+  // Include IsPublicSearchable so callers can know whether the provider opted in.
+  // Consumers should only surface profiles when role === 'service_provider' && IsPublicSearchable === true.
   return {
     userId: this.userId,
     firstName: this.firstName,
@@ -170,6 +189,7 @@ UserSchema.methods.toPublicJSON = function () {
     phones: this.phones,
     role: this.role,
     status: this.status,
+    IsPublicSearchable: !!this.IsPublicSearchable,
     selfIntro: this.selfIntro,
     descriptionCards: this.descriptionCards,
     createdAt: this.createdAt,
@@ -191,6 +211,59 @@ UserSchema.methods.toPublicJSON = function () {
 UserSchema.statics.findByEmail = function (email) {
   if (!email) return Promise.resolve(null);
   return this.findOne({ 'emails.value': String(email).toLowerCase().trim() });
+};
+
+/**
+ * publicSearch
+ * - Search public provider profiles for the public directory/search endpoint.
+ * - Only returns users with role === 'service_provider', status === 'active', and IsPublicSearchable === true.
+ * - Supports optional text query (uses text index) and simple filters/pagination.
+ *
+ * @param {string|null} q - free-text query (optional)
+ * @param {Object} opts - { limit, skip, sort, filters }
+ *   - filters: additional Mongo filters (e.g., { 'metadata.someKey': value })
+ * @returns {Promise<{ total: number, results: Array<Document> }>}
+ */
+UserSchema.statics.publicSearch = async function (q = null, opts = {}) {
+  const limit = Math.min(Math.max(Number(opts.limit) || 20, 1), 100);
+  const skip = Math.max(Number(opts.skip) || 0, 0);
+  const sort = opts.sort || { score: { $meta: 'textScore' }, updatedAt: -1 };
+  const filters = opts.filters && typeof opts.filters === 'object' ? opts.filters : {};
+
+  // Base query: only active providers who opted in
+  const baseQuery = Object.assign({}, filters, {
+    role: 'service_provider',
+    status: 'active',
+    IsPublicSearchable: true
+  });
+
+  let query;
+  if (q && String(q).trim().length > 0) {
+    // Use text search when query provided
+    query = Object.assign({}, baseQuery, { $text: { $search: String(q).trim() } });
+  } else {
+    query = baseQuery;
+  }
+
+  // Projection: use safe public fields only
+  const projection = {
+    passwordHash: 0,
+    refreshTokens: 0,
+    // keep other internal fields out by default; toPublicJSON will be used by callers
+  };
+
+  // Execute count and find in parallel
+  const [total, docs] = await Promise.all([
+    this.countDocuments(query).exec(),
+    this.find(query, projection)
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .lean()
+      .exec()
+  ]);
+
+  return { total: Number(total || 0), results: docs || [] };
 };
 
 /* -------------------------

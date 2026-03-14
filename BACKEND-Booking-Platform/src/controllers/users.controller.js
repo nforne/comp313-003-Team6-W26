@@ -1,13 +1,13 @@
 // src/controllers/users.controller.js
 //
 // HTTP controllers for user profile endpoints.
-// - getProfile: GET /users/:id
-// - updateProfile: PATCH /users/:id  (self or admin)
-// - changeRole: PATCH /users/:id/role
+// - GET /users/:id
+// - PATCH /users/:id
+// - PATCH /users/:id/role
 //
-// Controller responsibilities:
-// - Validate request-level authorization and input shape (basic).
-// - Delegate domain logic to userService (authoritative).
+// Responsibilities:
+// - Basic request-level authorization and input validation.
+// - Delegate domain logic to userService.
 // - Emit controller-level audit events for observability and quick rejection reasons.
 // - Return consistent HTTP status codes and JSON payloads.
 
@@ -113,7 +113,7 @@ async function updateProfile(req, res) {
     });
 
     // updated may be a Mongoose document; use toPublicJSON for safe projection
-    return res.json({ ok: true, user: updated.toPublicJSON ? updated.toPublicJSON() : updated });
+    return res.json({ ok: true, user: updated && typeof updated.toPublicJSON === 'function' ? updated.toPublicJSON() : updated });
   } catch (err) {
     await auditService.logEvent({
       eventType: 'user.update.failed',
@@ -200,7 +200,7 @@ async function changeRole(req, res) {
   // Delegate to service (service performs final checks and logs)
   try {
     const updated = await userService.changeRole(actor, targetUserId, value.role, correlationId);
-    return res.json({ ok: true, user: updated.toPublicJSON ? updated.toPublicJSON() : updated });
+    return res.json({ ok: true, user: updated && typeof updated.toPublicJSON === 'function' ? updated.toPublicJSON() : updated });
   } catch (err) {
     // Service already logs domain-level events; surface status and message
     return res.status(err.status || 500).json({ ok: false, error: { code: err.code || 'ERROR', message: err.message } });

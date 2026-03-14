@@ -19,24 +19,24 @@ const auth = require('../middleware/auth.middleware'); // { requireAuth, optiona
 const rbac = require('../middleware/rbac.middleware'); // { requireRole }
 
 /* Create booking (confirm) */
-router.post('/bkns/confirm', auth.requireAuth, bookingCtrl.confirmBooking);
+router.post('/confirm', auth.requireAuth, bookingCtrl.confirmBooking);
 
 /* Cancel booking (seeker/provider/admin) */
-router.post('/bkns/:id/cancel', auth.requireAuth, bookingCtrl.cancelBooking);
+router.post('/:id/cancel', auth.requireAuth, bookingCtrl.cancelBooking);
 
 /* Update booking - admin only */
-router.patch('/bkns/:id', auth.requireAuth, rbac.requireRole('administrator'), bookingCtrl.updateBooking);
+router.patch('/:id', auth.requireAuth, rbac.requireRole('administrator'), bookingCtrl.updateBooking);
 
 /* Get booking (public read allowed; optional auth for richer context) */
-router.get('/bkns/:id', auth.requireAuth, bookingCtrl.getBooking);
+router.get('/:id', auth.requireAuth, bookingCtrl.getBooking);
 
 /* List bookings for provider (providerId optional; defaults to authenticated user) */
-router.get('/bkns/provider/:providerId?', auth.requireAuth, bookingCtrl.listBookingsForProvider);
+router.get('/provider/:providerId?', auth.requireAuth, bookingCtrl.listBookingsForProvider);
 
 /* List bookings for seeker (seekerId optional; defaults to authenticated user) */
-router.get('/bkns/seeker/:seekerId?', auth.requireAuth, bookingCtrl.listBookingsForSeeker);
+router.get('/seeker/:seekerId?', auth.requireAuth, bookingCtrl.listBookingsForSeeker);
 
 /* List bookings for service (serviceId optional; caller may pass serviceId) */
-router.get('/bkns/service/:serviceId?', auth.requireAuth, bookingCtrl.listBookingsForService);
+router.get('/service/:serviceId?', auth.requireAuth, bookingCtrl.listBookingsForService);
 
 module.exports = router;
