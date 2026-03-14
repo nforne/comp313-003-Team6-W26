@@ -22,7 +22,7 @@ if (missing.length) {
 
 const config = {
   port: parseInt(process.env.PORT, 10) || 5000,
-  mongoUri: process.env.MONGO_URI,
+  mongoUri: process.env.MONGO_URI || 'mongo_connection_string',
   jwtSecret: process.env.JWT_SECRET,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
   nodeEnv: process.env.NODE_ENV || 'development',

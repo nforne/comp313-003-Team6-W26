@@ -3,14 +3,44 @@ const createApp = require('./src/app');
 const connectDB = require('./src/config/db');
 const config = require('./src/config/env');
 
-async function start() {
+const start = async () => {
   try {
     await connectDB(config.mongoUri);
 
-    const app = createApp();
+    // const seedIndex = require('./src/config/db-seeds/seed-db-models.index');
+    // const summary = await seedIndex.run({ force: false, dryRun: false, logger: console });
+    // console.log('Seed summary', summary);
+    
+    //--------------------------------------------------------------------------------------
+    const mongoose = require('mongoose');
+    const enableMongooseDebugLogging = require('./src/config/capture-mongoose-debug');
+
+    const disableLogging = enableMongooseDebugLogging(mongoose); // starts logging to ./debug.txt
+
+    // temporary debug: force all seeds and print full JSON
+    const seedIndex = require('./src/config/db-seeds/seed-db-models.index');
+    const summary = await seedIndex.run({ force: true, dryRun: false, logger: console });
+    console.log(JSON.stringify(summary, null, 2));
+
+    // // write-debug.js
+    // const fs = require('fs');
+    // const path = require('path');
+
+    // function writeDebug(message) {
+    //   const file = path.resolve(process.cwd(), 'debug.txt');
+    //   const line = `${new Date().toISOString()} - ${message}\n`;
+    //   fs.appendFileSync(file, line, { encoding: 'utf8' });
+    // }
+
+    // writeDebug(JSON.stringify(summary, null, 2))
+
+    disableLogging();
+    //--------------------------------------------------------------------------------------
+
+    const app = await createApp();
 
     const server = app.listen(config.port, () => {
-      console.log(`Server running in ${config.nodeEnv} mode on port ${config.port}`);
+      console.log(`\n\nServer running in ${config.nodeEnv} mode on port ${config.port}`);
     });
 
     // Graceful shutdown

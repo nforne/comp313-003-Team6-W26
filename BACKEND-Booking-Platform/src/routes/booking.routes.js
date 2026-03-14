@@ -30,13 +30,16 @@ router.patch('/:id', auth.requireAuth, rbac.requireRole('administrator'), bookin
 /* Get booking (public read allowed; optional auth for richer context) */
 router.get('/:id', auth.requireAuth, bookingCtrl.getBooking);
 
-/* List bookings for provider (providerId optional; defaults to authenticated user) */
-router.get('/provider/:providerId?', auth.requireAuth, bookingCtrl.listBookingsForProvider);
-
 /* List bookings for seeker (seekerId optional; defaults to authenticated user) */
-router.get('/seeker/:seekerId?', auth.requireAuth, bookingCtrl.listBookingsForSeeker);
+router.get('/seeker', auth.requireAuth, bookingCtrl.listBookingsForSeeker);
+router.get('/seeker/:seekerId', auth.requireAuth, bookingCtrl.listBookingsForSeeker);
+
+/* List bookings for provider (providerId optional; defaults to authenticated user) */
+router.get('/provider', auth.requireAuth, bookingCtrl.listBookingsForProvider);
+router.get('/provider/:providerId', auth.requireAuth, bookingCtrl.listBookingsForProvider);
 
 /* List bookings for service (serviceId optional; caller may pass serviceId) */
-router.get('/service/:serviceId?', auth.requireAuth, bookingCtrl.listBookingsForService);
+router.get('/service', auth.requireAuth, bookingCtrl.listBookingsForService);
+router.get('/service/:serviceId', auth.requireAuth, bookingCtrl.listBookingsForService);
 
 module.exports = router;

@@ -132,7 +132,7 @@ UserSchema.index({
  * - If `passwordHash` was modified and appears to be a plain password, hash it using bcrypt.
  * - Uses BCRYPT_SALT_ROUNDS env var (default 10).
  */
-UserSchema.pre('save', async function (next) {
+UserSchema.pre('save', async function () {
   try {
     const now = Date.now();
     this.updatedAt = now;
@@ -147,9 +147,9 @@ UserSchema.pre('save', async function (next) {
         this.passwordHash = await bcrypt.hash(maybeHash, saltRounds);
       }
     }
-    return next();
   } catch (err) {
-    return next(err);
+    // add context and rethrow so the save fails with a clear message
+    throw new Error(`User pre-save: password hashing failed: ${err.message}`);
   }
 });
 

@@ -9,21 +9,22 @@
  */
 
 const express = require('express');
-const router = express.Router();
 const bidController = require('../controllers/bid.controller');
-const auth = require('../middleware/auth'); // requireAuth / optionalAuth
-const rbac = require('../middleware/rbac'); // requireRole('service_provider')
+const auth = require('../middleware/auth.middleware'); // requireAuth / optionalAuth
+const rbac = require('../middleware/rbac.middleware'); // requireRole('service_provider')
+
+const router = express.Router();
 
 /* Create a bid (provider only) */
 router.post(
   '/reqs/:request_id/bids',
   auth.requireAuth,
-  rbac.requireRole('service_provider'),
+  rbac.requireAnyRole(['service_provider', 'administrator']),
   bidController.createBid
 );
 
 /* List bids for a request (visibility enforced in service/repo) */
-router.get('/reqs/:request_id/bids', auth.optionalAuth, bidController.listBidsForRequest);
+router.get('/reqs/:request_id/bids', auth.requireAuth, bidController.listBidsForRequest);
 
 /* Update a bid (provider or request owner/admin) */
 router.patch('/bids/:id', auth.requireAuth, bidController.updateBid);

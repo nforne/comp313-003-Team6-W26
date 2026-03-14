@@ -3,6 +3,7 @@
 // Joi validation schemas for Message APIs.
 // - Designed to be used with route-level `validate(schema, source)` middleware.
 // - Exports schemas for create, update, list queries, and common param checks.
+// - Also exports `validate(schema, source)` which returns Express middleware.
 
 const Joi = require('joi');
 
@@ -88,11 +89,52 @@ const metadataQuerySchema = Joi.object({
   limit: Joi.number().integer().min(1).max(100).default(20)
 });
 
+/**
+ * validate(schema, source)
+ * - Returns Express middleware that validates req[source] (body|params|query).
+ * - On success: replaces req[source] with the validated/stripped value and calls next().
+ * - On failure: responds 400 with structured error details.
+ *
+ * Usage:
+ *   router.post('/', validate(createMessageSchema, 'body'), handler);
+ *   router.get('/:id', validate(idParamSchema, 'params'), handler);
+ */
+function validate(schema, source = 'body') {
+  if (!schema || typeof schema.validateAsync !== 'function') {
+    throw new Error('validate middleware requires a Joi schema as first argument');
+  }
+  const allowedSources = new Set(['body', 'params', 'query']);
+  if (!allowedSources.has(source)) {
+    throw new Error(`validate middleware source must be one of ${Array.from(allowedSources).join(', ')}`);
+  }
+
+  return async (req, res, next) => {
+    const data = req[source] || {};
+    try {
+      const value = await schema.validateAsync(data, {
+        abortEarly: false,
+        allowUnknown: false,
+        stripUnknown: true
+      });
+      // replace the source with the validated value (useful for downstream handlers)
+      req[source] = value;
+      return next();
+    } catch (err) {
+      const details = (err && err.details && Array.isArray(err.details))
+        ? err.details.map(d => ({ message: d.message, path: d.path }))
+        : [{ message: err.message || 'validation error' }];
+
+      return res.status(400).json({ ok: false, errors: details });
+    }
+  };
+}
+
 module.exports = {
   createMessageSchema,
   updateMessageSchema,
   listQuerySchema,
   idParamSchema,
   metadataQuerySchema,
-  attachmentSchema
+  attachmentSchema,
+  validate
 };

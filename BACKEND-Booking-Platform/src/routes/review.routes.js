@@ -77,7 +77,7 @@ router.delete(
 router.delete(
   '/:id/hard',
   requireAuth,
-  requireRole('admin'),
+  requireRole('administrator'),
   validateIdParam,
   reviewCtrl.hardDeleteReview
 );

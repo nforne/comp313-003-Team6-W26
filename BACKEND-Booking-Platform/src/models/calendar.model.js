@@ -169,7 +169,7 @@ CalendarSchema.index({ 'bookingsSlots.bookingId': 1 });
 /* -------------------------
  * Pre-save normalization and docSize tracking
  * ------------------------- */
-
+//* This hook is synchronous (no async) so next() is valid and will not trigger the async/callback mixup.
 CalendarSchema.pre('save', function (next) {
   try {
     // normalize datesBracket.startEpoch to Monday 00:00 UTC and set endEpoch

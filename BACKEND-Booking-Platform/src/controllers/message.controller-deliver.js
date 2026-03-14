@@ -7,9 +7,9 @@
 // - Returns the comms result or throws an Error with .code/.status for controller handling.
 
 const userRepo = require('../repositories/user.repo');
-const comms = require('../src/comms-js/index');
+const comms = require('../comms-js/index');
 const auditService = require('../services/audit.service');
-const config = require('../src/comms-js/config');
+const config = require('../comms-js/config');
 
 function _makeError(message, code = 'ERROR', status = 400) {
   const e = new Error(message);

@@ -21,6 +21,10 @@
 const express = require('express');
 const service = require('../services/calendar.service');
 const auditService = require('../services/audit.service');
+const { requireAuth, optionalAuth } = require('../middleware/auth.middleware');
+const { requireRole, requireAnyRole } = require('../middleware/rbac.middleware');
+
+let adminOnly
 
 const router = express.Router();
 
@@ -315,7 +319,7 @@ router.post('/reserve', async (req, res) => {
  *
  * Note: route-level middleware should enforce admin; this is a defensive check.
  */
-router.post('/cleanup', adminOnly, async (req, res) => {
+router.post('/cleanup', requireAuth, requireRole('administrator'), async (req, res) => {
   const log = loggerFor(req);
   const correlationId = req.correlationId || null;
   try {
@@ -347,7 +351,7 @@ router.post('/cleanup', adminOnly, async (req, res) => {
  * POST /calendar/cleanup/scheduler
  * Body: { action: 'start'|'stop', intervalMs?, initialDelayMs?, cutoffWeekStartEpoch? }
  */
-router.post('/cleanup/scheduler', adminOnly, async (req, res) => {
+router.post('/cleanup/scheduler', requireAuth, requireRole('administrator'), async (req, res) => {
   const log = loggerFor(req);
   const correlationId = req.correlationId || null;
   try {

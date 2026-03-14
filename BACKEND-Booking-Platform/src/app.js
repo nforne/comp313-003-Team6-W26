@@ -9,10 +9,10 @@ const config = require('./config/env');
 
 // route imports
 const authRoutes = require('./routes/auth.routes');
-const servicesRoutes = require('./routes/services.routes');
-const requestsRoutes = require('./routes/requests.routes');
-const usersRoutes = require('./routes/users.routes');
-const auditsRoutes = require('./routes/audits.routes');
+const servicesRoutes = require('./routes/service.routes');
+const requestsRoutes = require('./routes/request.routes');
+const usersRoutes = require('./routes/user.routes');
+const auditsRoutes = require('./routes/audit.routes');
 const calendarRoutes = require('./routes/calendar.routes');
 const bookingRoutes = require('./routes/booking.routes');
 const messageRoutes = require('./routes/message.routes');

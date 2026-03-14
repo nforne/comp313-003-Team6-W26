@@ -10,7 +10,7 @@ const os = require('os');
 const path = require('path');
 
 const s3Repo = require('../repositories/s3Storage.repo');
-const fileRepo = require('../repos/s3storedfiles.repo');
+const fileRepo = require('../repositories/s3storedfiles.repo');
 const auditService = require('../services/audit.service'); // optional
 const logger = (global && global.logger) ? global.logger : console;
 

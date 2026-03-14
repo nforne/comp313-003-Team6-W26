@@ -6,8 +6,14 @@
 
 const express = require('express');
 const controller = require('../controllers/message.controller');
-const { createMessageSchema, updateMessageSchema, listQuerySchema, idParamSchema, metadataQuerySchema } = require('../validators/message.validator');
-const validate = require('../middleware/validate.middleware'); // validate(schema, source)
+const { 
+  createMessageSchema, 
+  updateMessageSchema, 
+  listQuerySchema, 
+  idParamSchema, 
+  metadataQuerySchema, 
+  validate } = require('../validators/message.validator'); // validate(schema, source) 
+  
 const { requireAuth } = require('../middleware/auth.middleware');
 const { requireRole } = require('../middleware/rbac.middleware');
 

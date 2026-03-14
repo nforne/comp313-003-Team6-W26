@@ -1,6 +1,5 @@
+// src/models/booking.model.js
 /**
- * src/models/booking.model.js
- *
  * Booking model (production-ready)
  *
  * - Uses epoch milliseconds (Number) for createdAt / updatedAt and slot boundaries.
@@ -124,6 +123,8 @@ BookingSchema.virtual('lastSlotTo').get(function () {
 /**
  * Ensure each slot has from < to and durations are within reasonable bounds.
  * Also ensure slots do not overlap each other.
+ *
+ * This hook is intentionally synchronous (no async) so Mongoose will call it in callback mode.
  */
 BookingSchema.pre('validate', function (next) {
   const MIN_DURATION_MS = 5 * 60 * 1000;        // 5 minutes
@@ -192,6 +193,8 @@ BookingSchema.pre('validate', function (next) {
 
 /**
  * Pre-save hook: maintain epoch timestamps
+ *
+ * This hook is synchronous (no async) so next() is valid and will not trigger the async/callback mixup.
  */
 BookingSchema.pre('save', function (next) {
   const now = Date.now();
@@ -325,4 +328,4 @@ BookingSchema.statics.listBySeeker = async function (seekerId, { page = 1, pageS
 BookingSchema.index({ provider_id: 1, 'slots.from': 1, 'slots.to': 1 });
 BookingSchema.index({ request_id: 1, provider_id: 1 });
 
-module.exports = mongoose.model('Booking', BookingSchema);
+module.exports = mongoose.models.Booking || mongoose.model('Booking', BookingSchema);

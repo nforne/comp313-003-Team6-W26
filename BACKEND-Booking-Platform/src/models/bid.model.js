@@ -1,6 +1,5 @@
+// src/models/bid.model.js
 /**
- * src/models/bid.model.js
- *
  * Bid schema (snake_case fields). Uses MongoDB _id as primary identifier.
  * createdAt / updatedAt stored as epoch milliseconds (Number).
  *
@@ -24,15 +23,17 @@ const BidSchema = new Schema({
     index: true
   },
   metadata: { type: Schema.Types.Mixed, default: {} },
-  createdAt: { type: Number, default: () => Date.now(), index: true },
-  updatedAt: { type: Number, default: () => Date.now() },
+  // Do not rely on schema defaults for timestamps here; pre-save hook will set them.
+  createdAt: { type: Number, index: true },
+  updatedAt: { type: Number },
   archived: { type: Boolean, default: false } // soft-delete flag for non-draft deletions
 }, {
   timestamps: false,
   versionKey: false
 });
 
-// keep timestamps as epoch ms
+// keep timestamps as epoch ms; synchronous pre-save ensures values are set before the actual save.
+// This is intentionally a non-async callback so Mongoose invokes it in callback mode and next() is valid.
 BidSchema.pre('save', function (next) {
   const now = Date.now();
   this.updatedAt = now;
@@ -46,4 +47,4 @@ BidSchema.index(
   { unique: true, partialFilterExpression: { archived: false } }
 );
 
-module.exports = mongoose.model('Bid', BidSchema);
+module.exports = mongoose.models.Bid || mongoose.model('Bid', BidSchema);
