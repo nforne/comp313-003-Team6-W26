@@ -59,20 +59,20 @@ const OffLimitSlotSchema = new Schema(
 );
 
 // Validate off-limit slot ranges at subdocument level
-OffLimitSlotSchema.pre('validate', function (next) {
+OffLimitSlotSchema.pre('validate', function () {
   try {
     if (typeof this.fromEpoch !== 'number' || typeof this.toEpoch !== 'number') {
-      return next(new Error('OffLimitSlot.fromEpoch and toEpoch must be numbers (epoch ms)'));
+      throw new Error('OffLimitSlot.fromEpoch and toEpoch must be numbers (epoch ms)');
     }
     if (this.fromEpoch >= this.toEpoch) {
-      return next(new Error('OffLimitSlot.fromEpoch must be less than toEpoch'));
+      throw new Error('OffLimitSlot.fromEpoch must be less than toEpoch');
     }
     if (this.weekday < 1 || this.weekday > 7) {
-      return next(new Error('OffLimitSlot.weekday must be between 1 and 7'));
+     throw new Error('OffLimitSlot.weekday must be between 1 and 7');
     }
-    return next();
   } catch (err) {
-    return next(err);
+    // add context and rethrow so the save fails with a clear message
+    throw new Error(`Calendar pre-save: OffLimitSlot validation failed: ${err.message}`);
   }
 });
 
@@ -93,18 +93,19 @@ const BookingSlotSchema = new Schema(
 );
 
 // Validate booking slot ranges at subdocument level
-BookingSlotSchema.pre('validate', function (next) {
+BookingSlotSchema.pre('validate', function () {
+  let err = {};
   try {
     if (typeof this.fromEpoch !== 'number' || typeof this.toEpoch !== 'number') {
-      return next(new Error('BookingSlot.fromEpoch and toEpoch must be numbers (epoch ms)'));
+      throw new Error('BookingSlot.fromEpoch and toEpoch must be numbers (epoch ms)');
     }
     if (this.fromEpoch >= this.toEpoch) {
-      return next(new Error('BookingSlot.fromEpoch must be less than toEpoch'));
+      throw new Error('BookingSlot.fromEpoch must be less than toEpoch');
     }
     // capacityUsed validated by schema min
-    return next();
   } catch (err) {
-    return next(err);
+    // add context and rethrow so the save fails with a clear message
+    throw new Error(`Calendar pre-save: BookingSlot validation failed: ${err.message}`);
   }
 });
 
@@ -170,7 +171,7 @@ CalendarSchema.index({ 'bookingsSlots.bookingId': 1 });
  * Pre-save normalization and docSize tracking
  * ------------------------- */
 //* This hook is synchronous (no async) so next() is valid and will not trigger the async/callback mixup.
-CalendarSchema.pre('save', function (next) {
+CalendarSchema.pre('save', function () {
   try {
     // normalize datesBracket.startEpoch to Monday 00:00 UTC and set endEpoch
     if (!this.datesBracket || !this.datesBracket.startEpoch) {
@@ -192,7 +193,7 @@ CalendarSchema.pre('save', function (next) {
         if (typeof o.fromEpoch === 'number' && typeof o.toEpoch === 'number') {
           // allow off-limits that overlap week; do not strictly reject but warn via thrown error if completely out of range
           if (o.toEpoch < this.datesBracket.startEpoch || o.fromEpoch > this.datesBracket.endEpoch) {
-            return next(new Error('OffLimitSlot must overlap the calendar week'));
+            throw new Error('OffLimitSlot must overlap the calendar week');
           }
         }
       }
@@ -202,7 +203,7 @@ CalendarSchema.pre('save', function (next) {
       for (const b of this.bookingsSlots) {
         if (typeof b.fromEpoch === 'number' && typeof b.toEpoch === 'number') {
           if (b.toEpoch < this.datesBracket.startEpoch || b.fromEpoch > this.datesBracket.endEpoch) {
-            return next(new Error('BookingSlot must overlap the calendar week'));
+            throw new Error('BookingSlot must overlap the calendar week');
           }
         }
       }
@@ -215,10 +216,9 @@ CalendarSchema.pre('save', function (next) {
     } catch (err) {
       // non-fatal: leave docSizeBytes as-is if calculation fails
     }
-
-    next();
   } catch (err) {
-    next(err);
+    // add context and rethrow so the save fails with a clear message
+    throw new Error(`Calendar pre-save:  normalization and docSize tracking failed: ${err.message}`);
   }
 });
 

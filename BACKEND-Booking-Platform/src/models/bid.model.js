@@ -34,11 +34,15 @@ const BidSchema = new Schema({
 
 // keep timestamps as epoch ms; synchronous pre-save ensures values are set before the actual save.
 // This is intentionally a non-async callback so Mongoose invokes it in callback mode and next() is valid.
-BidSchema.pre('save', function (next) {
-  const now = Date.now();
-  this.updatedAt = now;
-  if (!this.createdAt) this.createdAt = now;
-  next();
+BidSchema.pre('save', function () {
+  try {
+    const now = Date.now();
+    this.updatedAt = now;
+    if (!this.createdAt) this.createdAt = now;
+  } catch (err) {
+    throw new Error(`Keep timestamps at epoch ms failed ${err.message}`)
+  }
+ 
 });
 
 // Prevent more than one active (non-archived) bid per provider per request

@@ -10,7 +10,7 @@
 // - `providerId` links to the owning user (string). Use application-level checks to enforce ownership.
 // - Text index on `name` and `categories` supports simple search; consider a dedicated search service for advanced queries.
 
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
 /* -------------------------
@@ -22,87 +22,110 @@ const { Schema } = mongoose;
  * - use: semantic purpose of the contact (office, billing, support, other)
  * - value: contact string (email, phone, url, etc.)
  */
-const ContactSchema = new Schema({
-  use: { type: String, enum: ['office', 'billing', 'support', 'other'], default: 'office' },
-  value: { type: String, required: true, trim: true }
-}, { _id: false });
+const ContactSchema = new Schema(
+  {
+    use: {
+      type: String,
+      enum: ["office", "billing", "support", "other"],
+      default: "office",
+    },
+    value: { type: String, required: true, trim: true },
+  },
+  { _id: false },
+);
 
 /**
  * AddressSchema
  * - Flexible postal address structure; no strict validation here to keep it adaptable.
  */
-const AddressSchema = new Schema({
-  label: { type: String, trim: true, default: null },
-  line1: { type: String, trim: true, default: null },
-  line2: { type: String, trim: true, default: null },
-  city: { type: String, trim: true, default: null },
-  province: { type: String, trim: true, default: null },
-  postalCode: { type: String, trim: true, default: null },
-  country: { type: String, trim: true, default: null }
-}, { _id: false });
+const AddressSchema = new Schema(
+  {
+    label: { type: String, trim: true, default: null },
+    line1: { type: String, trim: true, default: null },
+    line2: { type: String, trim: true, default: null },
+    city: { type: String, trim: true, default: null },
+    province: { type: String, trim: true, default: null },
+    postalCode: { type: String, trim: true, default: null },
+    country: { type: String, trim: true, default: null },
+  },
+  { _id: false },
+);
 
 /**
  * DescriptionCardSchema
  * - Reusable card for rich descriptions, images and multi-line text.
  */
-const DescriptionCardSchema = new Schema({
-  cardId: { type: String, trim: true, default: null },
-  cardName: { type: String, trim: true, default: null },
-  title: { type: String, trim: true, default: null },
-  images: { type: [String], default: [] },
-  descriptions: { type: [String], default: [] }
-}, { _id: false });
+const DescriptionCardSchema = new Schema(
+  {
+    cardId: { type: String, trim: true, default: null },
+    cardName: { type: String, trim: true, default: null },
+    title: { type: String, trim: true, default: null },
+    images: { type: [String], default: [] },
+    descriptions: { type: [String], default: [] },
+  },
+  { _id: false },
+);
 
 /* -------------------------
  * Service schema
  * ------------------------- */
 
-const ServiceSchema = new Schema({
-  // Application-level identifier (not Mongo _id)
-  serviceId: { type: String, unique: true, required: true, index: true },
+const ServiceSchema = new Schema(
+  {
+    // Application-level identifier (not Mongo _id)
+    serviceId: { type: String, unique: true, required: true, index: true },
 
-  // Human-friendly name
-  name: { type: String, required: true, trim: true },
+    // Human-friendly name
+    name: { type: String, required: true, trim: true },
 
-  // Owner/provider reference (application-level id)
-  providerId: { type: String, required: true, index: true },
+    // Owner/provider reference (application-level id)
+    providerId: { type: String, required: true, index: true },
 
-  // Locations and contact points
-  addresses: { type: [AddressSchema], default: [] },
-  locations: { type: [String], default: [] }, // e.g., city names, region codes
-  contacts: { type: [ContactSchema], default: [] },
-  emails: { type: [String], default: [] },
-  phones: { type: [String], default: [] },
+    // Locations and contact points
+    addresses: { type: [AddressSchema], default: [] },
+    locations: { type: [String], default: [] }, // e.g., city names, region codes
+    contacts: { type: [ContactSchema], default: [] },
+    emails: { type: [String], default: [] },
+    phones: { type: [String], default: [] },
 
-  // Categorization and payment
-  categories: { type: [String], default: [] },
-  paymentMethods: { type: [Schema.Types.Mixed], default: [] },
+    // Categorization and payment
+    categories: { type: [String], default: [] },
+    paymentMethods: { type: [Schema.Types.Mixed], default: [] },
 
-  // Operational capacity and calendar
-  capacity: { type: Number, default: 1, min: 1 },
-  calendarId: { type: String, default: null },
+    // Operational capacity and calendar
+    capacity: { type: Number, default: 1, min: 1 },
+    calendarId: { type: String, default: null },
 
-  // Rich description cards and reviews
-  descriptionCards: { type: [DescriptionCardSchema], default: [] },
-  reviews: [{ type: Schema.Types.ObjectId, ref: 'Review' }],
+    // Rich description cards and reviews
+    descriptionCards: { type: [DescriptionCardSchema], default: [] },
+    reviews: [{ type: Schema.Types.ObjectId, ref: "Review" }],
 
-  // Lifecycle status
-  status: {
-    type: String,
-    enum: ['active', 'inactive', 'suspended', 'available', 'unavailable', 'out_of_service'],
-    default: 'active',
-    index: true
+    // Lifecycle status
+    status: {
+      type: String,
+      enum: [
+        "active",
+        "inactive",
+        "suspended",
+        "available",
+        "unavailable",
+        "out_of_service",
+      ],
+      default: "active",
+      index: true,
+    },
+
+    metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+
+    // Auditing timestamps (epoch ms)
+    createdAt: { type: Number, default: () => Date.now() },
+    updatedAt: { type: Number, default: () => Date.now() },
   },
-
-  metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
-
-  // Auditing timestamps (epoch ms)
-  createdAt: { type: Number, default: () => Date.now() },
-  updatedAt: { type: Number, default: () => Date.now() }
-}, {
-  collection: 'services',
-  versionKey: false
-});
+  {
+    collection: "services",
+    versionKey: false,
+  },
+);
 
 /* -------------------------
  * Indexes
@@ -112,7 +135,7 @@ const ServiceSchema = new Schema({
 ServiceSchema.index({ providerId: 1, name: 1 }, { unique: true, sparse: true });
 
 // Simple text index for name and categories to support basic search queries
-ServiceSchema.index({ name: 'text', categories: 'text' });
+ServiceSchema.index({ name: "text", categories: "text" });
 
 /* -------------------------
  * Hooks
@@ -122,11 +145,14 @@ ServiceSchema.index({ name: 'text', categories: 'text' });
  * pre-save hook
  * - Maintain updatedAt and createdAt timestamps in epoch milliseconds.
  */
-ServiceSchema.pre('save', function (next) {
-  const now = Date.now();
-  this.updatedAt = now;
-  if (!this.createdAt) this.createdAt = now;
-  next();
+ServiceSchema.pre("save", function () {
+  try {
+    const now = Date.now();
+    this.updatedAt = now;
+    if (!this.createdAt) this.createdAt = now;
+  } catch (err) {
+    throw new Error(`Service Pre-save : maintain update failed ${err.message}`);
+  }
 });
 
 /* -------------------------
@@ -156,7 +182,7 @@ ServiceSchema.methods.toPublicJSON = function () {
     status: this.status,
     reviews: this.reviews,
     createdAt: this.createdAt,
-    updatedAt: this.updatedAt
+    updatedAt: this.updatedAt,
   };
 };
 
@@ -164,4 +190,5 @@ ServiceSchema.methods.toPublicJSON = function () {
  * Export model
  * ------------------------- */
 
-module.exports = mongoose.models.Service || mongoose.model('Service', ServiceSchema);
+module.exports =
+  mongoose.models.Service || mongoose.model("Service", ServiceSchema);

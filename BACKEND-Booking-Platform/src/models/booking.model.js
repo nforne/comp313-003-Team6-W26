@@ -126,38 +126,38 @@ BookingSchema.virtual('lastSlotTo').get(function () {
  *
  * This hook is intentionally synchronous (no async) so Mongoose will call it in callback mode.
  */
-BookingSchema.pre('validate', function (next) {
+BookingSchema.pre('validate', function () {
   const MIN_DURATION_MS = 5 * 60 * 1000;        // 5 minutes
   const MAX_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
   if (!Array.isArray(this.slots)) {
     this.slots = [];
-    return next();
+    throw new Error('Booking slots must be an array -- []');
   }
-
+try{
   // Normalize numeric values and validate
   for (let i = 0; i < this.slots.length; i++) {
     const s = this.slots[i];
     if (typeof s.from !== 'number' || typeof s.to !== 'number') {
       const err = new Error('Slot boundaries must be epoch milliseconds (Number)');
       err.status = 400;
-      return next(err);
+      throw err;
     }
     if (s.from >= s.to) {
       const err = new Error(`Slot.from must be less than slot.to (slot index ${i})`);
       err.status = 400;
-      return next(err);
+      throw err;
     }
     const dur = s.to - s.from;
     if (dur < MIN_DURATION_MS) {
       const err = new Error(`Slot duration too short (min 5 minutes) at index ${i}`);
       err.status = 400;
-      return next(err);
+      throw err;
     }
     if (dur > MAX_DURATION_MS) {
       const err = new Error(`Slot duration too long (max 30 days) at index ${i}`);
       err.status = 400;
-      return next(err);
+      throw err;
     }
   }
 
@@ -167,7 +167,7 @@ BookingSchema.pre('validate', function (next) {
     if (sorted[i].from < sorted[i - 1].to) {
       const err = new Error('Slots must not overlap');
       err.status = 400;
-      return next(err);
+      throw err;
     }
   }
 
@@ -178,17 +178,19 @@ BookingSchema.pre('validate', function (next) {
       if (typeof s !== 'string') {
         const err = new Error(`Service id must be a string at index ${i}`);
         err.status = 400;
-        return next(err);
+        throw err;
       }
       if (s && !s.startsWith('svc_')) {
         const err = new Error(`Service id must start with 'svc_' at index ${i}`);
         err.status = 400;
-        return next(err);
+        throw err;
       }
     }
   }
-
-  next();
+} catch (error) {
+    // add context and rethrow so the save fails with a clear message
+    throw new Error(`Booking pre-save:  maintain epoch timestamp failed: ${err.message}`);
+  }
 });
 
 /**
@@ -196,11 +198,15 @@ BookingSchema.pre('validate', function (next) {
  *
  * This hook is synchronous (no async) so next() is valid and will not trigger the async/callback mixup.
  */
-BookingSchema.pre('save', function (next) {
-  const now = Date.now();
-  this.updatedAt = now;
-  if (!this.createdAt) this.createdAt = now;
-  next();
+BookingSchema.pre('save', function () {
+  try {
+    const now = Date.now();
+    this.updatedAt = now;
+    if (!this.createdAt) this.createdAt = now;  
+  } catch (error) {
+    // add context and rethrow so the save fails with a clear message
+    throw new Error(`Booking pre-save:  maintain epoch timestamp failed: ${err.message}`);
+  }
 });
 
 /* -------------------------

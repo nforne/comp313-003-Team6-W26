@@ -22,17 +22,17 @@ const start = async () => {
     const summary = await seedIndex.run({ force: true, dryRun: false, logger: console });
     console.log(JSON.stringify(summary, null, 2));
 
-    // // write-debug.js
-    // const fs = require('fs');
-    // const path = require('path');
+    // write-debug.js
+    const fs = require('fs');
+    const path = require('path');
 
-    // function writeDebug(message) {
-    //   const file = path.resolve(process.cwd(), 'debug.txt');
-    //   const line = `${new Date().toISOString()} - ${message}\n`;
-    //   fs.appendFileSync(file, line, { encoding: 'utf8' });
-    // }
+    function writeDebug(message) {
+      const file = path.resolve(process.cwd(), 'debug.txt');
+      const line = `${new Date().toISOString()} - ${message}\n`;
+      fs.appendFileSync(file, line, { encoding: 'utf8' });
+    }
 
-    // writeDebug(JSON.stringify(summary, null, 2))
+    writeDebug(JSON.stringify(summary, null, 2))
 
     disableLogging();
     //--------------------------------------------------------------------------------------
