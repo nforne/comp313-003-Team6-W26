@@ -9,10 +9,36 @@ function buildBase(actor = {}, correlationId = null) {
   };
 }
 
+function normalizeTarget(input) {
+  // Ensure we pass a string into the repo (matches existing schema)
+  if (input == null) return undefined;
+
+  // If it's already a string, return trimmed string
+  if (typeof input === 'string') {
+    const s = input.trim();
+    return s.length ? s : undefined;
+  }
+
+  // If it's an object with a type field, prefer that
+  if (typeof input === 'object' && !Array.isArray(input)) {
+    if (input.type != null) return String(input.type);
+    if (input.id != null) return String(input.id);
+    try {
+      return JSON.stringify(input);
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  // Fallback: coerce primitives to string
+  return String(input);
+}
+
 async function logEvent({ eventType, actor = {}, target = {}, outcome = 'success', severity = 'info', correlationId = null, details = {} }) {
   const record = Object.assign(buildBase(actor, correlationId), {
     eventType,
-    target,
+    // normalize target to a string to avoid Mongoose cast errors
+    target: normalizeTarget(target),
     outcome,
     severity,
     details
